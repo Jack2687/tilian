@@ -9,6 +9,8 @@
 - `engines/`、`*_engine/` — 各通道执行引擎（Python 子进程）
 - `deploy/` — PostgreSQL + Redis + Kafka 的 Docker Compose 编排
 
+> 💬 交流 QQ 群：**938623220**
+
 ---
 
 ## 启动
