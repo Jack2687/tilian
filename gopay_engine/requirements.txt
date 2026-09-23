@@ -1,0 +1,11 @@
+# GoPay 提链引擎运行时依赖（服务器部署时 pip install -r requirements.txt）
+# 核心依赖：requests（代理轮换/会话兜底）
+requests>=2.28
+
+# 可选（强烈建议）：curl_cffi 提供 Chrome TLS 指纹模拟，更接近真实浏览器；
+# 未安装时自动回落 requests，功能不受影响。
+curl_cffi>=0.7
+
+# 可选（仅当 gopay_service.py --gopay-browser-fallback 1 开启浏览器兜底时需要）：
+# playwright
+# camoufox

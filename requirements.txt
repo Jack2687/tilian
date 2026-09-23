@@ -1,0 +1,15 @@
+# Unified Python dependencies for all提链 engines.
+# Install from the project root:
+#   python -m pip install -r requirements.txt
+# PayPal/freepp backend (includes PyYAML, which is required by core.config).
+-r engines/freepp-backend/requirements.txt
+# GCash wallet engine and its Playwright QR/browser support.
+-r gcash_engine/requirements.txt
+# GoPay and direct-card adapters.
+-r gopay_engine/requirements.txt
+-r blik_engine/requirements.txt
+-r card_engine/requirements.txt
+# PIX Stripe Custom Checkout engine.
+-r pix_engine/requirements.txt
+# iDEAL NL QR/status engine (shares the GCash session helpers).
+-r ideal_engine/requirements.txt

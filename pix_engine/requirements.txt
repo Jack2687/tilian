@@ -1,0 +1,2 @@
+# PIX Stripe Custom Checkout engine
+curl_cffi>=0.15

@@ -1,0 +1,4 @@
+# 直卡提链引擎依赖（card_engine/ 自包含部署）
+# 安装: pip install -r requirements.txt
+
+curl_cffi>=0.15

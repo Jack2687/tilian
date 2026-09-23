@@ -1,0 +1,5 @@
+# iDEAL protocol engine (shares GCash's curl/session primitives).
+curl_cffi>=0.10
+requests>=2.28
+qrcode>=7.4
+Pillow>=9.0

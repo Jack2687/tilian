@@ -1,0 +1,24 @@
+# The API and worker launch every extraction engine with this virtualenv's
+# interpreter.  Keep the engine runtime dependencies in the same environment
+# instead of relying on whichever packages happen to be installed globally.
+-r ../requirements.txt
+-r ../engines/pay153-checkout-link-main/requirements.txt
+
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+pydantic==2.11.9
+pydantic-settings==2.10.1
+SQLAlchemy==2.0.43
+greenlet==3.2.4
+alembic==1.16.5
+asyncpg==0.30.0
+aiosqlite==0.21.0
+redis==6.4.0
+aiokafka==0.12.0
+httpx==0.28.1
+cryptography==45.0.7
+python-json-logger==3.3.0
+prometheus-client==0.22.1
+pytest==8.4.2
+pytest-asyncio==1.1.0
+ruff==0.13.0

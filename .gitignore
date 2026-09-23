@@ -1,0 +1,114 @@
+# Local credentials, captures and generated data
+.env
+**/.env
+**/.env.local
+.env.production
+**/*.har
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/runtime/
+**/sessions/
+**/data/*.json
+_research/
+data/
+backup_full_*/
+backup_local_*/
+
+# Local research/browser captures and generated diagnostics
+*.png
+*.jpg
+*.jpeg
+*.log
+*.bak_*
+*_ctx*.json
+*_session*.json
+_e*.json
+
+# Browser/tool caches and dependency artifacts
+**/node_modules/
+**/.npm-cache/
+**/dist/
+backend/data/
+**/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+**/__pycache__/
+**/.pytest_cache/
+**/Cache/
+**/GPUCache/
+**/Code Cache/
+**/Service Worker/CacheStorage/
+
+# OS/editor files
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+.venv/
+Python/
+
+# Local deployment bundles, reports and one-off diagnostics
+*.tar.gz
+*.docx
+_*.py
+_*.json
+{}
+# Deployment snapshots with mutable logs/state
+server_snapshot_20260817/*data*.json
+
+# Local experiments, runtime environments, generated deployment archives and reports
+.venv/
+Python/
+_browser_full_run.py
+_finish_auth.py
+_local_at_login_verify.py
+_local_qr_verify.py
+_monitor_base.json
+_real_gcash_run.py
+_roxy_run.py
+_run_program_qr.py
+_run_verify.py
+_e1.json
+_program_qr.log
+_qr_program.png
+_real_gcash_run.log
+_browser_full_run.log
+deploy-gcash-deps-20260824.tar.gz
+deploy-gcash-fix-20260824.tar.gz
+deploy-proxy-dependency-20260824.tar.gz
+deploy-ui-cdk-plus-20260824.tar.gz
+runtime.err.log
+runtime.out.log
+{}
+GCash_服务器成功提链日志分析_20260824.docx
+GCash_服务器成功提链日志分析_20260824.md
+GCASH提链逻辑.md
+项目全流程说明.md
+.deploy-code-files.txt
+pasted.png
+_icloud-api/
+server_snapshot_20260817/
+filters.xml
+engines/freepp-backend/config.yaml
+engines/freepp-backend/ba_paypal/research/
+gcash_engine/sentinel_assets/node_modules/
+gcash_engine/_gc_scan.py
+gcash_engine/_gc_state.json
+
+# HAR/协议抓包、自动提取文本与一次性分析输出（可能包含会话或支付数据）
+_har_js_all/
+_har_pngs/
+har_*.txt
+har_*.js
+_upi_*.txt
+promo_*.txt
+js_*_context.txt
+js_create_candidates.txt
+backend_api.txt
+checkout_create_context.txt
+
+# 仅用于本地排查的临时探针
+engines/pay153-checkout-link-main/_probe_new1.py
+engines/pay153-checkout-link-main/_upi_protocol_capture.py
