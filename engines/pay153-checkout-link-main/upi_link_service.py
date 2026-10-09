@@ -1,6 +1,7 @@
 from __future__ import annotations
 import base64
 import asyncio
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -8,6 +9,7 @@ import os
 import random
 import re
 import secrets
+import tempfile
 import threading
 import time
 import uuid
@@ -32,10 +34,60 @@ MAX_APPROVE_ATTEMPTS = 6
 # Keep that boundary in the Python service as well; the outer Node/Worker retry
 # still remains responsible for selecting a new task attempt.
 MAX_REBUILD_ATTEMPTS = 5
-# SetupIntent 未生成支付方式时，当前 Checkout 会话已被上游风控判废；
-# 直接返回给 Node，由调度层更换代理+指纹并从建单阶段完整重试。
+# 明确的支付设置拒绝作为终态返回，不在同一 Checkout 上再次提交。
+# generic_decline 本身不能证明风控拦截或某个请求字段是拒绝原因。
 MAX_SETUP_INTENT_RETRIES = 0
 AMOUNT_POLICY_MAX = 50000
+UPI_TLS_CONFIGURATION_ERROR = 'UPI 本地证书配置错误：请求库无法加载 CA 证书，请检查运行环境（curl 77）'
+_UPI_CA_CACHE_LOCK = threading.Lock()
+_UPI_CA_CACHE: dict[str, Any] = {}
+
+
+def _upi_ascii_ca_path(source: str) -> str:
+    """Retain the selected trust bundle while avoiding Windows narrow paths.
+
+    Some libcurl TLS backends cannot open a CA filename containing non-ASCII
+    characters. Python can read it, so keep an exact copy in a private process
+    temporary directory. TemporaryDirectory cleans it up at process exit.
+    """
+    try:
+        pem = Path(source).read_bytes()
+        if not pem:
+            raise ValueError('empty CA bundle')
+        digest = hashlib.sha256(pem).hexdigest()
+        with _UPI_CA_CACHE_LOCK:
+            directory = _UPI_CA_CACHE.get(digest)
+            if directory is None:
+                directory = tempfile.TemporaryDirectory(prefix='tilian-ca-')
+                if not directory.name.isascii():
+                    directory.cleanup()
+                    raise ValueError('CA temporary directory must have an ASCII path')
+                _UPI_CA_CACHE[digest] = directory
+            target = Path(directory.name) / 'cacert.pem'
+            if not target.is_file() or target.read_bytes() != pem:
+                temporary = target.with_suffix('.tmp')
+                temporary.write_bytes(pem)
+                temporary.replace(target)
+            return str(target)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(UPI_TLS_CONFIGURATION_ERROR) from exc
+
+
+def _new_upi_http_session(impersonate: str) -> Any:
+    # Let curl_cffi choose REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE first, retaining
+    # enterprise trust configuration. Otherwise use its effective default.
+    session = curl_requests.Session(impersonate=impersonate)
+    try:
+        if os.name == 'nt':
+            from curl_cffi.curl import DEFAULT_CACERT
+            source = session.verify if isinstance(session.verify, str) else DEFAULT_CACERT
+            if not str(source).isascii():
+                session.verify = _upi_ascii_ca_path(str(source))
+        session.trust_env = False
+        return session
+    except Exception:
+        session.close()
+        raise
 
 
 # UPI 对外错误统一使用中文；原始英文仅用于服务端调试，不直接返回前端。
@@ -44,6 +96,14 @@ def localize_upi_error(error: Any) -> str:
     if not raw:
         return 'UPI 提链失败：未收到上游返回信息，请稍后重试'
     text = raw.lower()
+
+    if (
+        raw.startswith('UPI 本地证书配置错误')
+        or re.search(r'curl\s*:?\s*\(77\)', text)
+        or 'error adding trust anchors' in text
+        or 'error setting certificate verify locations' in text
+    ):
+        return UPI_TLS_CONFIGURATION_ERROR
 
     # 已经是业务中文时，去掉括号中的英文上游原文，避免前端继续出现英文。
     # “优惠未应用”和“账号明确无资格”必须分开：前者表示 Checkout
@@ -56,6 +116,10 @@ def localize_upi_error(error: Any) -> str:
         return 'UPI 账号登录凭证已失效，请重新获取 AT 后再试'
     if '任务已停止' in raw:
         return 'UPI 提链任务已停止'
+    if raw.startswith('UPI 账单地址'):
+        return raw
+    if raw.startswith('UPI Stripe 支付设置失败'):
+        return raw
 
     # Stripe 在 ChatGPT approve 之后可能创建 SetupIntent；如果上游返回
     # setup_attempt_failed/generic_decline，失败发生在支付设置阶段，不能再
@@ -66,13 +130,17 @@ def localize_upi_error(error: Any) -> str:
         or 'generic_decline' in text
         or 'upi_payment_setup_declined' in text
         or 'upi custom checkout submission failed' in text
+        or 'upi stripe intent failed' in text
+        or 'payment_method_provider_decline' in text
     ):
-        return (
-            'UPI Checkout 被上游风控拦截（blocked）：Stripe 返回 setup_attempt_failed / generic_decline；'
-            'SetupIntent 未生成有效支付方式，未生成 PaymentIntent/支付链接。'
-            '该错误发生在优惠应用之后，不是前置字段缺失；当前 Checkout 已终止，'
-            '请检查有效 AT、印度代理和官方浏览器风控上下文后重新发起任务'
-        )
+        if any(marker in text for marker in ('risk_blocked', 'status=blocked', 'result=blocked', '风控拦截')):
+            return 'UPI Checkout 被上游风控拦截（blocked），当前 Checkout 已终止'
+        codes = [code for code in (
+            'setup_attempt_failed', 'generic_decline', 'payment_method_provider_decline',
+            'processing_error', 'checkout_approval_payment_failure_with_payment_error',
+        ) if code in text]
+        detail = '；错误码=' + ', '.join(codes) if codes else ''
+        return 'UPI Stripe 支付设置失败：当前 Checkout 已终止' + detail
 
     # 保证中文错误可重复归一化：网络层可能先把异常翻译一次，CLI
     # 捕获后还会再次调用本函数；二次处理必须保留原来的细分类，
@@ -155,6 +223,8 @@ def localize_upi_error(error: Any) -> str:
         return 'UPI Stripe 确认令牌创建失败：上游未返回有效确认令牌'
     if 'checkout/confirm missing paymentintent' in text:
         return 'UPI Checkout 确认失败：上游未返回有效 PaymentIntent'
+    if 'upi checkout/confirm' in text and 'intent' in text:
+        return 'UPI Checkout 确认失败：上游支付对象类型、编号或凭据缺失或不一致'
     if 'payment intent 未生成支付链接' in raw or 'payment intent did not generate' in text:
         return 'UPI 支付意图未生成支付链接：请更换代理或检查账号支付状态'
     if 'payment page 未生成支付链接' in raw or 'payment page did not generate' in text:
@@ -352,8 +422,8 @@ UPI_BILLING_NAMES = (
     'Tanvi Shah', 'Ravi Kumar', 'Lakshmi Narayanan', 'Arnav Kohli', 'Anushka Bansal',
     'Kabir Sethi', 'Zoya Khan', 'Manav Trivedi', 'Simran Kaur', 'Yash Khurana',
 )
-# 印度真实地址池（真实公开场所地址，跨 16 个邦/联邦属地）。
-# 与 billing_address_resolver 的 builtin IN 池保持同源同构，CLI 直连无缓存也全随机。
+# 内置印度地址候选：78 条，覆盖 49 个城市、24 个邦/联邦属地。
+# 这些静态记录提供本地格式/区域校验依据，不代表邮政地址认证。
 UPI_BILLING_ADDRESS_POOL = (
     ('Apollo Bunder, Colaba', 'Mumbai', 'MH', '400001'),
     ('Nariman Point', 'Mumbai', 'MH', '400021'),
@@ -435,10 +505,60 @@ UPI_BILLING_ADDRESS_POOL = (
     ('M G Road, Panaji Market', 'Panaji', 'GA', '403001'),
 )
 
-# 账单同城缓存(txt 文档:probe_exit_city 复用,账单与代理出口同城更真实;探测失败不影响随机)
-# 进程级缓存:每个子进程只探测一次(避免每次尝试/重试都重新探测拖慢提链)
-_EXIT_CITY: str = ''
+# 城市查询仅供显式启用同城选择且未填写地址时使用，按代理缓存。
 _EXIT_CITY_BY_PROXY: dict[str, str] = {}
+_UPI_BILLING_PICK_LOCK = threading.Lock()
+_UPI_LAST_BILLING_ROW: tuple[str, str, str, str] | None = None
+
+_UPI_CITY_ALIASES = {
+    'bangalore': 'Bengaluru', 'bombay': 'Mumbai', 'gurgaon': 'Gurugram',
+    'calcutta': 'Kolkata', 'cochin': 'Kochi', 'madras': 'Chennai',
+    'trivandrum': 'Thiruvananthapuram', 'mysore': 'Mysuru',
+    'mangalore': 'Mangaluru', 'calicut': 'Kozhikode', 'panjim': 'Panaji',
+    'allahabad': 'Prayagraj', 'delhi': 'New Delhi',
+}
+
+
+def _upi_city_name(value: str) -> str:
+    city = ' '.join(str(value or '').split())
+    return _UPI_CITY_ALIASES.get(city.casefold(), city)
+
+
+def _upi_state_code(value: str) -> str:
+    state = ' '.join(str(value or '').split()).casefold()
+    for code, name in INDIA_STATE_NAMES.items():
+        if state in {code.casefold(), name.casefold()}:
+            return code
+    return ''
+
+
+def _upi_billing_address_rows() -> list[tuple[str, str, str, str]]:
+    """Merge static candidates once per selection, preserving equal row weights."""
+    candidates = list(UPI_BILLING_ADDRESS_POOL)
+    try:
+        from billing_address_resolver import _BUILTIN_PUBLIC_ADDRESSES
+    except ImportError:
+        resolver_rows = []
+    else:
+        resolver_rows = _BUILTIN_PUBLIC_ADDRESSES.get('IN') or []
+    for row in resolver_rows:
+        if isinstance(row, dict) and str(row.get('country') or 'IN').strip().upper() == 'IN':
+            candidates.append(tuple(row.get(key) for key in ('line1', 'city', 'state', 'postal_code')))
+    result = []
+    seen = set()
+    for row in candidates:
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            continue
+        line1, city, state, postal = (str(value or '').strip() for value in row)
+        line1 = ' '.join(line1.split())
+        city, state = _upi_city_name(city), _upi_state_code(state)
+        if not line1 or not city or not state or not re.fullmatch(r'[1-9][0-9]{5}', postal):
+            continue
+        signature = (line1.casefold(), city.casefold(), state, postal)
+        if signature not in seen:
+            seen.add(signature)
+            result.append((line1, city, state, postal))
+    return result
 
 
 def _probe_upi_exit_city(proxy: str) -> str:
@@ -463,11 +583,7 @@ def _probe_upi_exit_city(proxy: str) -> str:
 
 
 def _resolver_indian_address_row() -> tuple | None:
-    """从 billing_address_resolver 的内置印度地址池再取一行（扩大随机面）。
-
-    该池是地标/真实街道级数据且 邦码/邮编 自洽；取不到就返回 None，
-    不影响 UPI 自身地址池。
-    """
+    """Compatibility helper; UPI selection uses the deduplicated full pool."""
     try:
         from billing_address_resolver import resolve_public_address  # 同目录模块
         resolved = resolve_public_address('IN', '', '', '')
@@ -485,32 +601,22 @@ def _resolver_indian_address_row() -> tuple | None:
 
 
 def _random_upi_billing_address(preferred_city: str = '') -> dict[str, str]:
-    """**全随机**选一组印度账单地址（姓名+街道+城市+邦+邮编）。
-
-    * 每次调用都重新随机（不按账号/设备固定），同一账号重试之间地址也会变化；
-    * 街道/城市/邦/邮编取自同一行，邮编与邦码保持自洽；
-    * 除 UPI 自带地址池外，再混入 billing_address_resolver 的印度地标池提高多样性；
-    * preferred_city 只在显式要求"与出口同城"时传入（见 _upi_billing_sync_city）。
-    """
+    """Pick one whole address; avoid consecutive repeats within this process."""
+    global _UPI_LAST_BILLING_ROW
     rng = random.SystemRandom()
-    pool = [
-        tuple(row) for row in UPI_BILLING_ADDRESS_POOL
-        if len(row) == 4
-        and all(str(value or '').strip() for value in row)
-        and re.fullmatch(r'[A-Z]{2}', str(row[2] or '').strip())
-        and re.fullmatch(r'\d{6}', str(row[3] or '').strip())
-    ]
+    pool = _upi_billing_address_rows()
     if not pool:
-        pool = list(UPI_BILLING_ADDRESS_POOL)
-    extra = _resolver_indian_address_row()
-    if extra:
-        pool = pool + [extra]
-    city_hint = str(preferred_city or '').strip()
+        raise ValueError('UPI 账单地址池为空或没有有效记录')
+    city_hint = _upi_city_name(preferred_city).casefold()
     if city_hint:
-        same = [row for row in pool if str(row[1] or '').strip().lower() == city_hint.lower()]
+        same = [row for row in pool if row[1].casefold() == city_hint]
         if same:
             pool = same
-    line1, city, state, postal = rng.choice(pool)
+    with _UPI_BILLING_PICK_LOCK:
+        choices = [row for row in pool if row != _UPI_LAST_BILLING_ROW] or pool
+        selected = rng.choice(choices)
+        _UPI_LAST_BILLING_ROW = selected
+    line1, city, state, postal = selected
     return {
         'name': rng.choice(UPI_BILLING_NAMES),
         'email': '',
@@ -524,50 +630,25 @@ def _random_upi_billing_address(preferred_city: str = '') -> dict[str, str]:
     }
 
 
-_KNOWN_INDIAN_CITIES_CACHE: set[str] | None = None
-
-
 def _known_indian_cities() -> set[str]:
-    """已知的印度城市集合（UPI 地址池 + billing_address_resolver 内置池）。"""
-    global _KNOWN_INDIAN_CITIES_CACHE
-    if _KNOWN_INDIAN_CITIES_CACHE is not None:
-        return _KNOWN_INDIAN_CITIES_CACHE
-    cities: set[str] = set()
-    for row in UPI_BILLING_ADDRESS_POOL:
-        if len(row) == 4 and str(row[1] or '').strip():
-            cities.add(str(row[1]).strip().lower())
-    try:
-        from billing_address_resolver import _BUILTIN_PUBLIC_ADDRESSES  # 同目录内置印度地址池
-        for row in (_BUILTIN_PUBLIC_ADDRESSES.get('IN') or []):
-            city = str((row or {}).get('city') or '').strip().lower()
-            if city:
-                cities.add(city)
-    except Exception:
-        pass
-    _KNOWN_INDIAN_CITIES_CACHE = cities
-    return cities
+    return {row[1].casefold() for row in _upi_billing_address_rows()}
 
 
-def _is_complete_indian_address(line1: str, city: str, state: str, postal: str) -> bool:
-    """地址是否可直接使用：完整、印度、且邦码/邮编/城市都自洽。
-
-    邦允许两字母邦码或 `INDIA_STATE_NAMES` 里的邦名全称；城市必须在已知
-    印度城市集合内（否则视为占位/非印度地址，整条替换成全随机印度地址）。
-    """
-    line1_text = str(line1 or '').strip()
-    city_text = str(city or '').strip()
-    state_text = str(state or '').strip()
+def _is_complete_indian_address(line1: str, city: str, state: str, postal: str, country: str = 'IN') -> bool:
+    """Check known city/state/PIN-prefix relationships, not postal deliverability."""
+    if str(country or '').strip().casefold() not in {'in', 'india'}:
+        return False
+    city_text = _upi_city_name(city).casefold()
+    state_code = _upi_state_code(state)
     postal_text = str(postal or '').strip()
-    if not line1_text or not city_text:
+    if not str(line1 or '').strip() or not city_text or not state_code:
         return False
-    if not re.fullmatch(r'\d{6}', postal_text):
+    if not re.fullmatch(r'[1-9][0-9]{5}', postal_text):
         return False
-    state_ok = bool(re.fullmatch(r'[A-Za-z]{2}', state_text)) or state_text.upper() in {
-        str(value).upper() for value in INDIA_STATE_NAMES.values()
-    }
-    if not state_ok:
-        return False
-    return city_text.lower() in _known_indian_cities()
+    return any(
+        row_city.casefold() == city_text and row_state == state_code and row_postal[:3] == postal_text[:3]
+        for _, row_city, row_state, row_postal in _upi_billing_address_rows()
+    )
 
 
 def _upi_billing_sync_city() -> bool:
@@ -787,14 +868,12 @@ def _extract_session_token_from_raw(raw: str) -> str:
 
 def _refresh_access_token_from_session(session_token: str, proxy: str, device_id: str,
                                        fingerprint: dict[str, Any] | None = None) -> str:
-    from curl_cffi import requests as cr
     token = str(session_token or '').strip()
     if not token:
         return ''
     proxy_url = str(proxy or '').strip()
     fp = fingerprint if isinstance(fingerprint, dict) else {}
-    session = cr.Session(impersonate=str(fp.get('impersonate') or 'chrome131'))
-    session.trust_env = False
+    session = _new_upi_http_session(str(fp.get('impersonate') or 'chrome131'))
     for name in SESSION_COOKIE_NAMES:
         try:
             session.cookies.set(name, token, domain='chatgpt.com', path='/')
@@ -816,7 +895,9 @@ def _refresh_access_token_from_session(session_token: str, proxy: str, device_id
         if not isinstance(data, dict):
             return ''
         return str(data.get('accessToken') or '').strip()
-    except Exception:
+    except Exception as exc:
+        if localize_upi_error(exc) == UPI_TLS_CONFIGURATION_ERROR:
+            raise RuntimeError(UPI_TLS_CONFIGURATION_ERROR) from exc
         return ''
     finally:
         session.close()
@@ -1155,8 +1236,7 @@ class UpiHttpClient:
         self.sentinel_version = str(os.environ.get('UPI_SENTINEL_VERSION') or '').strip()
         self.attestation_deploy_id = ''
         self.client_observation_at = 0.0
-        self.session = curl_requests.Session(impersonate=self.impersonate)
-        self.session.trust_env = False
+        self.session = _new_upi_http_session(self.impersonate)
         self.session.headers.update(self._browser_headers())
         self.session.cookies.set('oai-did', self.device_id, domain='chatgpt.com')
         self.session.cookies.set('oai-did', self.device_id, domain='.chatgpt.com')
@@ -2279,11 +2359,8 @@ def _upi_passive_captcha_fields(
 ) -> dict[str, str]:
     """生成 Stripe payment_pages confirm 需要的 passive_captcha_token/ekey。
 
-    HAR 证据(UPI.har #473/#500/#609):浏览器在 confirm 之前先跑完 Stripe 的
-    hCaptcha passive(api.hcaptcha.com/getcaptcha 解 PoW + r.stripe.com/b 的
-    elements.captcha.passive.* 事件),再把得到的 P1_… 令牌作为
-    passive_captcha_token 提交。缺失该令牌时 Stripe 不会在前置校验报错,
-    而是在优惠应用之后的支付设置阶段返回 setup_attempt_failed / generic_decline。
+    历史 HAR 的浏览器 confirm 包含 passive_captcha_token，但这些样本
+    不能证明缺少该字段就是 setup_attempt_failed / generic_decline 的原因。
     令牌无法离线伪造，必须使用当前 challenge 的 hsw.js 完成 PoW 并向
     api.hcaptcha.com/getcaptcha 换取。默认直接走真实 Chrome 求解；纯协议
     链(jsdom 跑 hsw.js)在 Stripe 上稳定返回 soft_reject，属于必然失败且
@@ -2726,9 +2803,12 @@ def _extract_upi_from_text(text: str) -> str:
 def _payment_page_poll_summary(payload: Any) -> str:
     """Return a small, credential-free diagnostic for a failed payment-page poll."""
     if not isinstance(payload, dict):
-        return str(payload or '')[:180]
+        return 'invalid payment-page response'
 
-    keys = ','.join(list(payload.keys())[:8])
+    def code(value: Any) -> str:
+        return value if isinstance(value, str) and re.fullmatch(r'[a-zA-Z0-9_-]{1,100}', value) else '-'
+
+    keys = ','.join(code(key) for key in list(payload.keys())[:8])
     submission = payload.get('submission_attempt')
     submission = submission if isinstance(submission, dict) else {}
     submission_error = submission.get('error')
@@ -2749,15 +2829,59 @@ def _payment_page_poll_summary(payload: Any) -> str:
     decline_code = payment_error.get('decline_code') or setup_error.get('decline_code')
     payment_intent = payload.get('payment_intent')
     payment_intent_present = bool(payment_intent)
-    payment_intent_status = payment_intent.get('status') if isinstance(payment_intent, dict) else ''
+    payment_intent = payment_intent if isinstance(payment_intent, dict) else {}
+    payment_intent_status = payment_intent.get('status')
+    intent_error = payment_intent.get('last_payment_error')
+    intent_error = intent_error if isinstance(intent_error, dict) else {}
     setup_intent_present = bool(setup_intent)
+    method_type = '-'
+    for holder in (setup_intent, payment_intent, setup_error, intent_error, payment_error):
+        method = holder.get('payment_method')
+        if isinstance(method, dict) and code(method.get('type')) != '-':
+            method_type = code(method.get('type'))
+            break
     return (
-        f"keys=[{keys}]; state={state or '-'}; status={status or '-'}; "
-        f"error={error_code or '-'}; payment_error={payment_error_code or '-'}; "
-        f"setup_error={setup_error_code or '-'}; decline={decline_code or '-'}; "
-        f"payment_intent={'present' if payment_intent_present else 'missing'}({payment_intent_status or '-'})"
-        f" setup_intent={'present' if setup_intent_present else 'missing'}"
+        # The adapter retains 500 characters per stage. Put the actionable
+        # states and error codes before the optional shape diagnostics.
+        f"state={code(state)}; status={code(status)}; "
+        f"setup_status={code(setup_intent.get('status'))}; payment_status={code(payment_intent_status)}; "
+        f"payment_method_type={method_type}; "
+        f"error={code(error_code)}; payment_error={code(payment_error_code)}; "
+        f"setup_error={code(setup_error_code)}; decline={code(decline_code)}; "
+        f"intent_error={code(intent_error.get('code'))}; intent_decline={code(intent_error.get('decline_code'))}; "
+        f"payment_intent={'present' if payment_intent_present else 'missing'}({code(payment_intent_status)})"
+        f" setup_intent={'present' if setup_intent_present else 'missing'}; "
+        f"keys=[{keys}]"
     )
+
+
+def _upi_http_diagnostic(status: int, headers: Any) -> str:
+    """Keep only the HTTP status and an upstream request identifier."""
+    request_id = '-'
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            if str(key).lower() in {'request-id', 'x-request-id'}:
+                if isinstance(value, str) and re.fullmatch(r'[a-zA-Z0-9_-]{1,100}', value):
+                    request_id = value
+                    break
+    return f'HTTP={int(status)}; request_id={request_id}'
+
+
+def _raise_for_upi_payment_page_failure(payload: dict[str, Any]) -> None:
+    submission = payload.get('submission_attempt')
+    if isinstance(submission, dict) and str(submission.get('state') or '').strip().lower() == 'failed':
+        raise RuntimeError('UPI Custom Checkout submission failed: ' + _payment_page_poll_summary(payload))
+    for key in ('setup_intent', 'payment_intent'):
+        intent = payload.get(key)
+        if not isinstance(intent, dict):
+            continue
+        state = str(intent.get('status') or '').strip().lower()
+        # A newly exposed intent can still be waiting for its payment method.
+        # Only reject that page state when the provider also reports an error.
+        if state == 'canceled' or (state == 'requires_payment_method' and (
+            intent.get('last_setup_error') or intent.get('last_payment_error')
+        )):
+            _raise_for_upi_intent_failure(intent)
 
 def _find_upi_action_url(value: Any) -> str:
     if isinstance(value, dict):
@@ -2840,52 +2964,72 @@ def _stripe_confirm_return_url(cs_id: str, processor_entity: str, stripe_hosted_
     new_query = urlencode(query)
     return parsed._replace(query=new_query).geturl()
 
+def _upi_supplied_address(billing: dict[str, Any] | None) -> dict[str, str] | None:
+    """Validate an explicitly entered address, leaving absent addresses optional."""
+    if billing is not None and not isinstance(billing, dict):
+        raise ValueError('UPI 账单地址格式错误：billing 必须是 JSON 对象')
+    source = billing if isinstance(billing, dict) else {}
+    if source.get('address') is not None and not isinstance(source['address'], dict):
+        raise ValueError('UPI 账单地址格式错误：address 必须是 JSON 对象')
+    address = source.get('address') if isinstance(source.get('address'), dict) else {}
+
+    def value(key: str, *aliases: str) -> str:
+        for item in (key, *aliases):
+            candidate = address.get(item) if item in address else source.get(item)
+            if candidate is None:
+                continue
+            if not isinstance(candidate, str) and not (
+                key == 'postal_code' and isinstance(candidate, int) and not isinstance(candidate, bool)
+            ):
+                raise ValueError(f'UPI 账单地址格式错误：{key} 必须是文本字段')
+            if str(candidate).strip():
+                return str(candidate).strip()
+        return ''
+
+    country = value('country') or 'IN'
+    if country.casefold() not in {'in', 'india'}:
+        raise ValueError('UPI 账单地址国家必须为 IN（印度），请修正填写的国家')
+    fields = {key: value(key) for key in ('line1', 'line2', 'city', 'state')}
+    fields['postal_code'] = value('postal_code', 'postal')
+    if not any(fields.values()):
+        return None
+    if not all(fields[key] for key in ('line1', 'city', 'state', 'postal_code')):
+        raise ValueError('UPI 账单地址不完整：请填写街道、城市、邦和六位邮编')
+    if not _is_complete_indian_address(fields['line1'], fields['city'], fields['state'], fields['postal_code'], country):
+        raise ValueError('UPI 账单地址未通过本地校验：请核对国家、城市、邦和邮编；本地地址池可能尚未覆盖该城市或邮区')
+    fields['state'] = _upi_state_code(fields['state'])
+    city_key = _upi_city_name(fields['city']).casefold()
+    fields['city'] = next(row[1] for row in _upi_billing_address_rows() if row[1].casefold() == city_key)
+    fields['country'] = 'IN'
+    return fields
+
+
 def _normalize_upi_billing(
     billing: dict[str, Any] | None,
     email: str,
     *,
     preferred_city: str = '',
 ) -> dict[str, str]:
-    """解析本次提链使用的账单身份，地址部分**始终是全随机印度地址**。
-
-    * caller 给了"完整且自洽的印度地址"就直接用（app.py 的
-      default_billing("IN", ..., real_random=True) 本身就是全随机印度地址）；
-    * 缺字段、非印度地址、或邮编/邦码格式不自洽时，整条替换为随机印度地址；
-    * 地址在单次 attempt 内只解析一次，之后的 taxes / snapshot / confirm /
-      confirmation_token 全部复用同一个对象（与 HAR 里全链同一套地址一致）。
-    """
+    """Keep valid caller addresses; use the pool only when no address was entered."""
     source = billing if isinstance(billing, dict) else {}
-    address = source.get('address') if isinstance(source.get('address'), dict) else {}
-    fallback = DEFAULT_UPI_BILLING['address']
-    # Accept both the nested shape used by UPI and the flat shape used by
-    # GoPay's generic billing helper.
-    random_billing = _random_upi_billing_address(preferred_city=preferred_city)
-    random_address = random_billing['address']
-
-    def value(key: str, *aliases: str) -> str:
-        for item in (key, *aliases):
-            candidate = address.get(item) if item in address else source.get(item)
-            if candidate not in (None, ''):
-                return str(candidate).strip()
-        return ''
-
-    line1 = value('line1')
-    city = value('city')
-    state = value('state')
-    postal = value('postal_code', 'postal')
-    if not _is_complete_indian_address(line1, city, state, postal):
-        line1 = str(random_address['line1'] or fallback['line1']).strip()
-        city = str(random_address['city'] or fallback['city']).strip()
-        state = str(random_address['state'] or fallback['state']).strip()
-        postal = str(random_address['postal_code'] or fallback['postal_code']).strip()
+    address = _upi_supplied_address(billing)
+    if address is None:
+        selected = _random_upi_billing_address(preferred_city=preferred_city)
+        address = selected['address']
+        default_name = selected['name']
+    else:
+        default_name = ''
+    name = str(source.get('name') or '').strip()
+    if not name:
+        name = default_name or random.SystemRandom().choice(UPI_BILLING_NAMES)
     return {
-        'name': str(source.get('name') or random_billing['name']).strip(),
-        'email': str(source.get('email') or email or f'checkout-{uuid.uuid4().hex[:10]}@outlook.com').strip(),
-        'line1': line1,
-        'line2': value('line2'),
-        'city': city,
-        'state': INDIA_STATE_NAMES.get(str(state).upper(), str(state)),
-        'postal_code': postal,
+        'name': name,
+        'email': str(source.get('email') or '').strip() or str(email or '').strip() or f'checkout-{uuid.uuid4().hex[:10]}@outlook.com',
+        'line1': address['line1'],
+        'line2': address.get('line2', ''),
+        'city': address['city'],
+        'state': INDIA_STATE_NAMES[address['state']],
+        'postal_code': address['postal_code'],
         'country': 'IN',
     }
 
@@ -2896,12 +3040,7 @@ def build_upi_billing(
     *,
     preferred_city: str = '',
 ) -> dict[str, str]:
-    """构建一套自洽的印度账单身份（地址全随机）。
-
-    Caller-supplied billing data still wins（只要是完整自洽的印度地址）；
-    否则从印度真实地址池随机取一行。preferred_city 仅在显式要求与代理出口
-    同城时传入（UPI_BILLING_SYNC_CITY=1），默认走全印度随机。
-    """
+    """Normalize one attempt's billing data for reuse throughout Checkout."""
     return _normalize_upi_billing(billing, email, preferred_city=preferred_city)
 
 
@@ -2932,6 +3071,8 @@ def _upi_status_cn(value: Any) -> str:
 def extract_upi_link(access_token: str, proxy: str | None=None, *, proxy_pool: list[str] | None = None, promotion_proxy: str | None=None, billing: dict[str, Any] | None=None, fingerprint: dict[str, Any] | None=None, job_id: str='', on_step: Any=None, on_qr_update: Any=None, cancelled: Any=None, use_promo: bool = True, promo_campaign: str | None = None, checkout_ui_mode: str = 'auto', force_payment_method: bool = False, force_zero: bool = False, wait_paid: bool = False, paid_timeout: float = 900.0, upi_rail: str = 'upi', upi_setup_v2: bool = False, require_server_upi_mandate: bool = False, requested_upi_mandate: dict[str, Any] | None = None, upi_har_context: bool = False) -> dict[str, Any]:
     if not use_promo:
         raise RuntimeError('UPI only supports zero-due promotional checkout; original-price links are disabled')
+    # Reject bad user input before authentication, proxy probes or Checkout.
+    supplied_address = _upi_supplied_address(billing)
     proxy_url = _normalize_upi_proxy_url(str(proxy or resolve_upi_proxy() or '').strip())
     if not proxy_url:
         raise RuntimeError('proxy is required for UPI extraction')
@@ -2941,15 +3082,14 @@ def extract_upi_link(access_token: str, proxy: str | None=None, *, proxy_pool: l
     # stages intentionally collapse to the payment proxy.
     setup_proxy_pool = [proxy_url]
     campaign_id = str(promo_campaign or UPI_PROMO_COUPON).strip()
-    # 账单同城(txt 文档):探测建单代理出口城市,让印度账单与出口同城更真实。
-    # 进程内只探测一次并缓存;重试/后续调用直接复用,避免拖慢提链。
-    global _EXIT_CITY
-    if proxy_url not in _EXIT_CITY_BY_PROXY:
-        try:
-            _EXIT_CITY_BY_PROXY[proxy_url] = _probe_upi_exit_city(proxy_url)
-        except Exception:
-            _EXIT_CITY_BY_PROXY[proxy_url] = ''
-    _EXIT_CITY = _EXIT_CITY_BY_PROXY.get(proxy_url, '')
+    preferred_city = ''
+    if supplied_address is None and _upi_billing_sync_city():
+        if proxy_url not in _EXIT_CITY_BY_PROXY:
+            try:
+                _EXIT_CITY_BY_PROXY[proxy_url] = _probe_upi_exit_city(proxy_url)
+            except Exception:
+                _EXIT_CITY_BY_PROXY[proxy_url] = ''
+        preferred_city = _EXIT_CITY_BY_PROXY.get(proxy_url, '')
     promotion_proxy_url = _normalize_upi_proxy_url(
         str(promotion_proxy or proxy_url).strip()
     ) or proxy_url
@@ -3048,17 +3188,17 @@ def extract_upi_link(access_token: str, proxy: str | None=None, *, proxy_pool: l
             else:
                 step('优惠资格预检', 'info', '未提交优惠活动')
 
-            # 每次尝试都会新建一个 Checkout 会话，因此账单身份也在每次尝试时重新
-            # 全随机为印度地址（caller 传的地址只有在完整自洽时才沿用）。
+            # Each attempt reuses caller billing or selects one pool address;
+            # taxes, snapshot and confirmation share this same result.
             upi_billing = build_upi_billing(
                 email,
                 billing,
-                preferred_city=_EXIT_CITY if _upi_billing_sync_city() else '',
+                preferred_city=preferred_city,
             )
             step(
                 '账单地址',
                 'info',
-                f'本次尝试使用随机印度账单：{upi_billing["city"]}/{upi_billing["state"]} {upi_billing["postal_code"]}',
+                f'本次账单地址：{upi_billing["city"]}/{upi_billing["state"]} {upi_billing["postal_code"]}',
             )
             result = _run_upi_attempt(client, token, step, steps, promotion_proxy=promotion_proxy_url, billing=upi_billing, setup_proxies=setup_proxy_pool, use_promo=use_promo, promo_campaign=campaign_id, on_qr_update=on_qr_update, cancelled=cancelled, checkout_ui_mode=checkout_ui_mode, force_payment_method=force_payment_method, force_zero=force_zero, wait_paid=wait_paid, paid_timeout=paid_timeout, upi_rail=upi_rail, upi_setup_v2=upi_setup_v2, require_server_upi_mandate=require_server_upi_mandate, requested_upi_mandate=requested_upi_mandate, upi_har_context=upi_har_context)
             watch_started = bool(result.pop('_watch_started', False))
@@ -3081,25 +3221,34 @@ def extract_upi_link(access_token: str, proxy: str | None=None, *, proxy_pool: l
                     pass
     raise last_error or RuntimeError('extract failed after rebuild retries')
 
+def _minor_units_amount(value: Any) -> int | None:
+    """Parse an integer minor-unit amount without rounding an upstream value."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        amount = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if isinstance(value, float) and value != amount:
+        return None
+    return amount
+
+
 def _amount_from_payload(payload: Any) -> int | None:
     if not isinstance(payload, (dict, list)):
         return None
 
-    def scalar(value: Any) -> int | None:
-        if isinstance(value, bool) or isinstance(value, (dict, list)):
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+    scalar = _minor_units_amount
 
-    def walk(value: Any) -> int | None:
+    def walk(value: Any) -> tuple[bool, int | None]:
+        # An explicitly returned but invalid total must stay unknown. Keep
+        # presence separate from its parsed value so a zero line item or
+        # discount cannot replace a malformed authoritative amount.
         if isinstance(value, dict):
             # Explicit API totals always win over nested line-item amounts.
             for key in ('amount_total', 'amount_due', 'due'):
-                found = scalar(value.get(key)) if key in value else None
-                if found is not None:
-                    return found
+                if key in value:
+                    return True, scalar(value[key])
 
             # Checkout payloads use checkout_state.total.total.minorUnitsAmount.
             # Prefer the innermost total before subtotal/discount children;
@@ -3107,42 +3256,38 @@ def _amount_from_payload(payload: Any) -> int | None:
             total = value.get('total')
             if isinstance(total, dict):
                 nested_total = total.get('total')
-                if isinstance(nested_total, dict):
-                    found = scalar(nested_total.get('minorUnitsAmount'))
-                    if found is not None:
-                        return found
-                found = scalar(total.get('minorUnitsAmount'))
-                if found is not None:
-                    return found
-                found = walk(total)
-                if found is not None:
-                    return found
+                if isinstance(nested_total, dict) and 'minorUnitsAmount' in nested_total:
+                    return True, scalar(nested_total['minorUnitsAmount'])
+                if 'minorUnitsAmount' in total:
+                    return True, scalar(total['minorUnitsAmount'])
+                present, found = walk(total)
+                if present:
+                    return True, found
 
             for key in ('total_summary', 'invoice', 'checkout_state', 'checkout_session'):
                 if key in value:
-                    found = walk(value.get(key))
-                    if found is not None:
-                        return found
+                    present, found = walk(value.get(key))
+                    if present:
+                        return True, found
 
             # Generic amount is retained as a last-resort fallback for Stripe
             # and legacy responses, but never before an explicit total.
             for key in ('amount',):
-                found = scalar(value.get(key)) if key in value else None
-                if found is not None:
-                    return found
+                if key in value:
+                    return True, scalar(value[key])
             for child in value.values():
                 if isinstance(child, (dict, list)):
-                    found = walk(child)
-                    if found is not None:
-                        return found
+                    present, found = walk(child)
+                    if present:
+                        return True, found
         elif isinstance(value, list):
             for child in value:
-                found = walk(child)
-                if found is not None:
-                    return found
-        return None
+                present, found = walk(child)
+                if present:
+                    return True, found
+        return False, None
 
-    return walk(payload)
+    return walk(payload)[1]
 
 
 def _zero_warn(step: Any, stage: str):
@@ -3157,21 +3302,22 @@ def _require_zero_due(amount: int | None, source: str, *, force: bool = False, o
     # 金额不是 0 只证明本次 Checkout 没有应用优惠，不足以证明账号没有资格。
     # 资格拒绝只有在上游明确返回 promotion/coupon eligibility 错误时才分类为
     # “账号无优惠资格”（见 _upi_promo_error）。
-    if amount is None:
+    verified_amount = _minor_units_amount(amount)
+    if verified_amount is None:
         if force:
             if callable(on_warn):
                 on_warn(source, amount)
             return 0
         raise RuntimeError(f'upi promo amount unavailable: source={source}')
-    if int(amount) != 0:
+    if verified_amount != 0:
         if force:
             # 强压 0 元（对齐 MoMo/GoPay --force-zero）：本地不再中断，继续
             # confirm/start；最终 0 元链接的校验仍由 Node 边界完成。
             if callable(on_warn):
-                on_warn(source, int(amount))
+                on_warn(source, verified_amount)
             return 0
-        raise RuntimeError(f'upi promo not applied: source={source}; amount={int(amount)}')
-    return int(amount)
+        raise RuntimeError(f'upi promo not applied: source={source}; amount={verified_amount}')
+    return verified_amount
 
 
 def _is_checkout_session_id(value: str) -> bool:
@@ -3182,10 +3328,47 @@ def _is_checkout_session_id(value: str) -> bool:
 def _payment_intent_id(value: Any) -> str:
     text = str(value or '').strip()
     if '_secret_' in text:
-        return text.split('_secret_', 1)[0]
+        text = text.split('_secret_', 1)[0]
     if text.startswith('pi_'):
         return text
     return ''
+
+
+def _checkout_intent(payload: dict[str, Any]) -> tuple[str, str, str]:
+    """Resolve the intent returned by Checkout without mixing IDs or secrets."""
+    declared = str(payload.get('type') or '').strip()
+    if declared and declared not in {'payment_intent', 'setup_intent'}:
+        raise RuntimeError('UPI checkout/confirm unsupported intent type')
+    secrets_found: set[str] = set()
+    ids: set[str] = set()
+    kinds: set[str] = {declared} if declared else set()
+    for holder, obj in [('', payload), *[(key, payload.get(key)) for key in ('payment_intent', 'setup_intent')]]:
+        if isinstance(obj, str):
+            value = obj.strip()
+            if value:
+                ids.add(value)
+                kinds.add(holder)
+            continue
+        if not isinstance(obj, dict):
+            continue
+        secret = _first_string(obj, ['client_secret'])
+        intent_id = _first_string(obj, ['id'])
+        if secret:
+            secrets_found.add(secret)
+        if intent_id:
+            ids.add(intent_id)
+        if holder and (secret or intent_id):
+            kinds.add(holder)
+    if len(secrets_found) != 1:
+        raise RuntimeError('UPI checkout/confirm missing or conflicting intent client_secret')
+    secret = next(iter(secrets_found))
+    intent_id, separator, secret_value = secret.partition('_secret_')
+    if not separator or not secret_value or not re.fullmatch(r'(?:pi|seti)_[A-Za-z0-9_]+', intent_id):
+        raise RuntimeError('UPI checkout/confirm invalid intent client_secret')
+    kind = 'setup_intent' if intent_id.startswith('seti_') else 'payment_intent'
+    if (kinds and kinds != {kind}) or any(value != intent_id for value in ids):
+        raise RuntimeError('UPI checkout/confirm conflicting intent type or id')
+    return kind, intent_id, secret
 
 
 def _har_return_url(cs_id: str, processor_entity: str) -> str:
@@ -3213,10 +3396,8 @@ def _elements_session(
     # the Checkout Session id instead.  Keep the old deferred-intent shape for
     # older accounts, but make the CustomerSession field conditional.
     custom = str(checkout_ui_mode or '').strip().lower() == 'custom'
-    # OAICS/deferred Elements must negotiate the same Checkout beta contract as
-    # MoMo.  The old UPI branch only sent this contract for custom Checkout,
-    # which left oaics_ sessions on the base Stripe version and could make the
-    # Elements/confirm state inconsistent.
+    # OAICS uses the base Elements contract (HAR entries 568/657). The
+    # payment_pages beta flags belong only to Stripe Custom Checkout.
     client_fp = getattr(client, 'fingerprint', {})
     client_fp = client_fp if isinstance(client_fp, dict) else {}
     client_region = str(getattr(client, 'region', '') or client_fp.get('country') or '').upper()
@@ -3247,14 +3428,12 @@ def _elements_session(
         'deferred_intent[setup_future_usage]': 'off_session',
         'currency': 'inr',
         'key': stripe_pk,
-        '_stripe_version': str(stripe_version or STRIPE_CUSTOM_VERSION),
+        '_stripe_version': str(stripe_version or (STRIPE_CUSTOM_VERSION if custom else STRIPE_VERSION)),
         'elements_init_source': 'custom_checkout' if custom else 'stripe.elements',
         'referrer_host': 'chatgpt.com',
         'stripe_js_id': stripe_js_id,
         'locale': elements_locale,
         'type': 'deferred_intent',
-        'client_betas[0]': 'custom_checkout_server_updates_1',
-        'client_betas[1]': 'custom_checkout_manual_approval_1',
     }
     # The reference negotiates the browser timezone only on the deferred-intent
     # (oaics_/Momo) contract; custom Checkout identifies the browser through
@@ -3429,6 +3608,7 @@ def _stripe_custom_checkout_fetch(
     elements: dict[str, Any],
     proxy: str,
     use_promo: bool = True,
+    step: Any = None,
 ) -> dict[str, Any]:
     """Fetch the current payment-page state with the exact Custom Checkout fields.
 
@@ -3450,10 +3630,21 @@ def _stripe_custom_checkout_fetch(
     }
     params = {key: value for key, value in params.items() if not key.startswith('client_attribution_metadata')}
     url = f'https://api.stripe.com/v1/payment_pages/{cs_id}?' + urlencode(params)
-    status, text, _ = client.request('GET', url, headers=_stripe_headers(client), proxy=proxy)
+    status, text, response_headers = client.request('GET', url, headers=_stripe_headers(client), proxy=proxy)
+    diagnostic = _upi_http_diagnostic(status, response_headers)
     if status == 400 and 'checkout_not_active_session' in (text or ''):
+        if callable(step):
+            step('查询UPI支付设置状态', 'info', diagnostic + '; error=checkout_not_active_session')
         raise RuntimeError('checkout_not_active_session')
-    return _json_or_error(status, text, 'stripe custom checkout fetch')
+    try:
+        data = _json_or_error(status, text, 'stripe custom checkout fetch')
+    except RuntimeError:
+        if callable(step):
+            step('查询UPI支付设置状态', 'info', diagnostic)
+        raise
+    if callable(step):
+        step('查询UPI支付设置状态', 'info', diagnostic + '; ' + _payment_page_poll_summary(data))
+    return data
 
 
 def _stripe_unknown_param(text: str) -> str:
@@ -3587,11 +3778,8 @@ def _stripe_custom_checkout_confirm(
         value = str(os.environ.get(env_key) or init_data.get(key) or '').strip()
         if value:
             form[key] = value
-    # passive_captcha_token/ekey 必须由当前 challenge 的 hsw.js 完成 PoW
-    # (HAR #473→#609) 得到；默认使用纯协议，失败可回退真实 Chrome。缺失时
-    # Stripe 在支付设置阶段返回 setup_attempt_failed / generic_decline。
-    # site_key 由 elements/sessions 的 passive_captcha.site_key 下发，求解
-    # 失败按可选字段降级不阻断建单。
+    # 只使用当前会话的验证字段；历史 HAR 的字段差异不能单独证明拒绝原因。
+    # site_key 来自 Elements；保留既有可选字段处理。
     passive_captcha = elements.get('passive_captcha') if isinstance(elements, dict) else None
     captcha_site_key = str((passive_captcha or {}).get('site_key') or '').strip() if isinstance(passive_captcha, dict) else ''
     form.update(
@@ -3608,10 +3796,12 @@ def _stripe_custom_checkout_confirm(
     form.setdefault('passive_captcha_ekey', '')
     form['link_brand'] = 'link'
     for attempt in range(4):
-        status, text, _ = client.request(
+        status, text, response_headers = client.request(
             'POST', f'https://api.stripe.com/v1/payment_pages/{cs_id}/confirm',
             headers=_stripe_headers(client), form=form, proxy=proxy,
         )
+        if callable(step):
+            step('提交Stripe支付确认', 'info', _upi_http_diagnostic(status, response_headers))
         if status == 200:
             return _json_or_error(status, text, 'stripe custom checkout confirm')
         unknown = _stripe_unknown_param(text)
@@ -3878,6 +4068,8 @@ def _stripe_custom_checkout_poll(
     # client_attribution_metadata is a form field valid on POST /confirm and
     # /init; passing it on the GET poll makes Stripe reject with HTTP 400
     # parameter_unknown ("Received unknown parameter: client_attribution_metadata").
+    if callable(step):
+        step('查询UPI支付设置状态', 'run', '正在查询 Stripe 支付设置结果')
     last: dict[str, Any] = {}
     for attempt in range(1, max_attempts + 1):
         _ensure_upi_not_cancelled(cancelled)
@@ -3896,23 +4088,24 @@ def _stripe_custom_checkout_poll(
                 elements=elements,
                 proxy=proxy,
                 use_promo=use_promo,
+                step=step,
             )
         except RuntimeError as exc:
             if 'checkout_not_active_session' in str(exc) and attempt < max_attempts:
                 time.sleep(1.5)
                 continue
             raise
+        # Reject terminal states before exposing a residual QR or hosted URL.
+        _raise_for_upi_payment_page_failure(last)
         # UPI QR (HAR 印度UPI.har): next_action.upi_handle_redirect_or_display_qr_code
         # carries qr_code.image_url_svg; push it live so the front-end can show
         # it exactly like the GCash QR while we keep polling for the payment.
         qr = _extract_upi_qr(last)
         if qr:
             _emit_upi_qr(qr, on_qr_update, step, client)
-        if _extract_redirect_url(last):
+        if _upi_copyable_link(last, qr):
             return last
         submission = last.get('submission_attempt') if isinstance(last, dict) else None
-        if isinstance(submission, dict) and str(submission.get('state') or '').lower() == 'failed':
-            raise RuntimeError('UPI Custom Checkout submission failed: ' + _payment_page_poll_summary(last))
         # 到账 = submission succeeded（0 元授权即订阅已创建），或 setup_intent
         # 已完成；与 GCash 的 payment_status 事件语义一致。
         if isinstance(submission, dict) and str(submission.get('state') or '').lower() == 'succeeded':
@@ -4126,6 +4319,7 @@ def _run_upi_custom_checkout(
     }
 
     def submit_setup_intent(candidate: str) -> dict[str, Any]:
+        step('提交Stripe支付确认', 'run', '正在提交 UPI 支付设置')
         confirmation = _stripe_custom_checkout_confirm(
             client, cs_id=cs_id, processor_entity=processor_entity, stripe_pk=stripe_pk,
             stripe_js_id=stripe_js_id, elements=elements, init_data=init_data,
@@ -4136,6 +4330,7 @@ def _run_upi_custom_checkout(
             use_promo=use_promo,
             step=step,
         )
+        _raise_for_upi_payment_page_failure(confirmation)
         if _confirm_requires_approval(confirmation):
             _checkout_approve_custom(
                 client, token=token, cs_id=cs_id, processor_entity=processor_entity,
@@ -4182,17 +4377,20 @@ def _run_upi_custom_checkout(
         intent_id = str(intent_obj.get('id') or '').strip()
         intent_secret = str(intent_obj.get('client_secret') or '').strip()
         if intent_id and intent_secret:
+            step('查询UPI支付意图状态', 'run', '正在查询 Stripe 支付意图状态')
             if intent_kind == 'payment':
                 polled = _poll_stripe_payment_intent(
                     client, payment_intent_id=intent_id, client_secret=intent_secret,
                     stripe_pk=stripe_pk, steps=steps, proxy=proxy, cancelled=cancelled,
                     max_attempts=min(UPI_PAYMENT_POLL_ATTEMPTS, 20), on_qr_update=on_qr_update, step=step,
+                    stripe_version=STRIPE_CUSTOM_VERSION,
                 )
             else:
                 polled = _poll_stripe_setup_intent(
                     client, setup_intent_id=intent_id, client_secret=intent_secret,
                     stripe_pk=stripe_pk, proxy=proxy, cancelled=cancelled,
                     max_attempts=min(UPI_PAYMENT_POLL_ATTEMPTS, 20), on_qr_update=on_qr_update, step=step,
+                    stripe_version=STRIPE_CUSTOM_VERSION,
                 )
             if isinstance(polled, dict):
                 # Keep the page's hosted URL/QR if the intent endpoint omits
@@ -4498,6 +4696,53 @@ def _stripe_payment_intent_confirm(
     return _json_or_error(status, text, 'stripe payment intent confirm')
 
 
+def _stripe_setup_intent_confirm(
+    client: UpiHttpClient,
+    *,
+    setup_intent_id: str,
+    client_secret: str,
+    confirmation_token: str,
+    stripe_pk: str,
+    stripe_js_id: str,
+    return_url: str,
+    proxy: str,
+) -> dict[str, Any]:
+    # HAR entry 735 uses the same form as PaymentIntent confirmation, but
+    # the endpoint is selected from Checkout's returned intent type.
+    form = {
+        'return_url': return_url,
+        'confirmation_token': confirmation_token,
+        'key': stripe_pk,
+        '_stripe_version': STRIPE_VERSION,
+        'client_attribution_metadata[client_session_id]': stripe_js_id,
+        'client_attribution_metadata[merchant_integration_source]': 'l1',
+        'client_secret': client_secret,
+    }
+    headers = _stripe_headers(client)
+    headers['content-type'] = 'application/x-www-form-urlencoded'
+    status, text, _ = client.request(
+        'POST', f'https://api.stripe.com/v1/setup_intents/{setup_intent_id}/confirm',
+        headers=headers, form=form, proxy=proxy,
+    )
+    return _json_or_error(status, text, 'stripe setup intent confirm')
+
+
+def _raise_for_upi_intent_failure(payload: dict[str, Any]) -> None:
+    state = str(payload.get('status') or '').strip().lower()
+    if state not in {'canceled', 'requires_payment_method'}:
+        return
+    error = payload.get('last_setup_error') or payload.get('last_payment_error') or {}
+    # Preserve machine-readable error codes without logging the payment
+    # method, billing data or client_secret embedded in the error object.
+    codes = []
+    if isinstance(error, dict):
+        for key in ('code', 'decline_code'):
+            value = str(error.get(key) or '')
+            if re.fullmatch(r'[a-zA-Z0-9_]{1,100}', value):
+                codes.append(f'{key}={value}')
+    raise RuntimeError('UPI Stripe intent failed: status=' + state + ('; ' + '; '.join(codes) if codes else ''))
+
+
 def _poll_stripe_payment_intent(
     client: UpiHttpClient,
     *,
@@ -4510,8 +4755,9 @@ def _poll_stripe_payment_intent(
     max_attempts: int = 10,
     on_qr_update: Any = None,
     step: Any = None,
+    stripe_version: str = STRIPE_VERSION,
 ) -> dict[str, Any]:
-    params = {'is_stripe_sdk': 'false', 'client_secret': client_secret, 'key': stripe_pk, '_stripe_version': STRIPE_CUSTOM_VERSION}
+    params = {'is_stripe_sdk': 'false', 'client_secret': client_secret, 'key': stripe_pk, '_stripe_version': stripe_version}
     url = f'https://api.stripe.com/v1/payment_intents/{payment_intent_id}?' + urlencode(params)
     last: dict[str, Any] = {}
     for attempt in range(1, max_attempts + 1):
@@ -4520,18 +4766,19 @@ def _poll_stripe_payment_intent(
         headers['content-type'] = 'application/x-www-form-urlencoded'
         status, text, _ = client.request('GET', url, headers=headers, proxy=proxy)
         last = _json_or_error(status, text, 'stripe payment intent poll')
+        _raise_for_upi_intent_failure(last)
         # UPI 支付意图进入 requires_action 后，next_action 携带二维码
         # （HAR 印度UPI.har #273/#285）；每次轮询响应都可能刷新 expires_at，
         # 这里持续把最新二维码推给前端，直到 status=succeeded（到账）。
         qr = _extract_upi_qr(last)
         if qr:
             _emit_upi_qr(qr, on_qr_update, step, client)
-        if _extract_redirect_url(last):
-            return last
         state = str(last.get('status') or '').strip()
         if state == 'succeeded':
             _emit_upi_paid(on_qr_update, 'succeeded')
             steps.append({'name': 'payment intent poll', 'status': 'ok', 'detail': f'status={state}（到账）'})
+            return last
+        if _upi_copyable_link(last, qr):
             return last
         if state in {'succeeded', 'processing', 'requires_action'}:
             steps.append({'name': 'payment intent poll', 'status': 'info', 'detail': f'attempt {attempt}/{max_attempts}; status={state}'})
@@ -4551,6 +4798,7 @@ def _poll_stripe_setup_intent(
     max_attempts: int = 10,
     on_qr_update: Any = None,
     step: Any = None,
+    stripe_version: str = STRIPE_VERSION,
 ) -> dict[str, Any]:
     """Poll the zero-due UPI SetupIntent endpoint seen in UPI.har.
 
@@ -4563,7 +4811,7 @@ def _poll_stripe_setup_intent(
         'client_secret': client_secret,
         'is_stripe_sdk': 'false',
         'key': stripe_pk,
-        '_stripe_version': STRIPE_CUSTOM_VERSION,
+        '_stripe_version': stripe_version,
     }
     url = f'https://api.stripe.com/v1/setup_intents/{setup_intent_id}?' + urlencode(params)
     last: dict[str, Any] = {}
@@ -4571,6 +4819,7 @@ def _poll_stripe_setup_intent(
         _ensure_upi_not_cancelled(cancelled)
         status, text, _ = client.request('GET', url, headers=_stripe_headers(client), proxy=proxy)
         last = _json_or_error(status, text, 'stripe setup intent poll')
+        _raise_for_upi_intent_failure(last)
         qr = _extract_upi_qr(last)
         if qr:
             _emit_upi_qr(qr, on_qr_update, step, client)
@@ -4578,6 +4827,8 @@ def _poll_stripe_setup_intent(
         if state in {'succeeded', 'canceled'}:
             if state == 'succeeded':
                 _emit_upi_paid(on_qr_update, state)
+            return last
+        if _upi_copyable_link(last, qr):
             return last
         if callable(step):
             qr_hint = '有' if qr else '无'
@@ -4833,10 +5084,8 @@ def _run_upi_attempt(client: UpiHttpClient, token: str, step: Any, steps: list[d
     _warmup_india_client(client, token, checkout_proxy)
     step('浏览器指纹', 'ok', f'印度 {client.kernel.capitalize()} {client.chrome_full}；语言={client.locale}；设备号={client.device_id[:8]}…；动态部署证明=已获取')
     _human_pause('short')
-    # ── checkout_ui_mode 自动分流（对齐 MoMo auto）：auto=按建单返回的
-    #    checkout_ui_mode 自动识别 custom(oaics/Elements) vs hosted(cs_live_)；
-    #    也可显式指定 custom / hosted / deferred。这里先记录请求模式，用于
-    #    决定建单请求是否显式要求 custom（否则上游可能返回 legacy deferred）。──
+    # Auto uses the native server-selected session. Explicit modes retain
+    # the older payment_pages/deferred routing choices.
     _requested_ui_mode = str(checkout_ui_mode or 'auto').strip().lower()
     # UPI 只有两条真实路径：custom（cs_live_ → Stripe payment_pages，即
     # MoMo 所称 hosted）与 deferred（oaics_ → Elements）。因此 hosted 归入
@@ -4855,18 +5104,11 @@ def _run_upi_attempt(client: UpiHttpClient, token: str, step: Any, steps: list[d
         # create a full-price session and mutate it through the old
         # legacy session-update route; that route is not part of the HAR
         # flow and can leave the session/payment intent inconsistent.
-        'checkout_ui_mode': _build_ui_mode,
     }
-    # 源站对 upi-git3/git4/git5 明确不加 cancel_url / check_card_proxy
-    # （app.py:1034-1041：「mirrors the browser HAR exactly so the backend can
-    # choose its native oaics_* flow」）。这两个字段只属于其它 rail；带着它们
-    # 会让建单偏离 git5 的 HAR 形状。浏览器 rail 保持原样。
-    if not _upi_is_protocol_rail(upi_rail):
-        checkout_body.update({
-            'cancel_url': 'https://chatgpt.com/',
-            'check_card_proxy': True,
-        })
-
+    # The native OAICS request (HAR entry 438) leaves UI selection to the
+    # server. Only an explicit caller choice sends checkout_ui_mode.
+    if _requested_ui_mode != 'auto':
+        checkout_body['checkout_ui_mode'] = _build_ui_mode
 
     if use_promo:
         checkout_body['promo_campaign'] = {
@@ -4905,9 +5147,9 @@ def _run_upi_attempt(client: UpiHttpClient, token: str, step: Any, steps: list[d
     # 但会话却是 cs_live_，反之亦然。显式指定 custom/hosted/deferred 时仍
     # 优先用户选择；auto 时按前缀自动识别，识别失败回退到响应字段。
     if _requested_ui_mode == 'auto':
-        if cs_id.startswith('cs_live_'):
+        if cs_id.startswith('cs_'):
             detected_mode = 'custom'
-            step('选择UPI支付通道', 'info', '检测到 cs_live_ 会话，走 hosted / Stripe Custom Checkout (payment_pages) 提链路径')
+            step('选择UPI支付通道', 'info', '检测到 cs_ 会话，走 hosted / Stripe Custom Checkout (payment_pages) 提链路径')
         elif cs_id.startswith('oaics_'):
             detected_mode = 'deferred'
             step('选择UPI支付通道', 'info', '检测到 oaics_ 会话，走 deferred-intent Elements 提链路径')
@@ -4915,6 +5157,8 @@ def _run_upi_attempt(client: UpiHttpClient, token: str, step: Any, steps: list[d
             detected_mode = ''
         if detected_mode:
             checkout_ui_mode = detected_mode
+    else:
+        checkout_ui_mode = _build_ui_mode
     checkout_client_secret = _checkout_prerequisite_string(
         checkout, text, ('client_secret', 'checkout_session_client_secret')
     )
@@ -5246,7 +5490,7 @@ def _run_upi_india_phase(client: UpiHttpClient, *, token: str, step: Any, steps:
         step(
             'OAICS参数协商',
             'ok',
-            '已发送完整 Stripe beta、client_betas、locale、时区和动态支付方式'
+            '已发送 Stripe 基础版本、locale、时区和服务端支付方式'
             + f'；methods={",".join(_payment_method_types(elements) or _payment_method_types(promo_payload) or ["card", "upi"])}',
         )
     _ensure_upi_offered(
@@ -5306,9 +5550,9 @@ def _run_upi_india_phase(client: UpiHttpClient, *, token: str, step: Any, steps:
             referer=referer,
             proxy=provider_proxy,
         )
-        tax_amount = _amount_from_payload(taxes)
-        if tax_amount is not None:
-            amount = tax_amount
+        # Taxes is the latest authoritative total. Missing or malformed
+        # amounts must not silently inherit a zero from the create response.
+        amount = _amount_from_payload(taxes)
     if use_promo:
         if amount is None or int(amount) != 0:
             if force_zero:
@@ -5410,9 +5654,9 @@ def _run_upi_india_phase(client: UpiHttpClient, *, token: str, step: Any, steps:
         stripe_js_id=stripe_js_id,
         elements=elements,
         payment_method_types=(
-            _payment_method_types(elements)
-            or _payment_method_types(oaics_state)
+            _payment_method_types(oaics_state)
             or _payment_method_types(promo_payload)
+            or _payment_method_types(elements)
         ),
         proxy=provider_proxy,
         time_on_page_ms=max(5000, int(time.monotonic() * 1000) - started_ms + 5000),
@@ -5425,16 +5669,8 @@ def _run_upi_india_phase(client: UpiHttpClient, *, token: str, step: Any, steps:
 
     _sentinel_ping(client, token, provider_proxy, referer)
     chat_confirm = _checkout_confirm_with_token(client, token=token, cs_id=cs_id, processor_entity=processor_entity, confirm_token=confirm_token, proxy=provider_proxy, step=step)
-    client_secret = _first_string(chat_confirm, ['client_secret'])
-    payment_intent_id = _payment_intent_id(_first_string(chat_confirm, ['payment_intent', 'client_secret']))
-    if not client_secret and isinstance(chat_confirm.get('payment_intent'), dict):
-        client_secret = _first_string(chat_confirm['payment_intent'], ['client_secret'])
-        payment_intent_id = _payment_intent_id(client_secret)
-    if not payment_intent_id:
-        payment_intent_id = _payment_intent_id(chat_confirm.get('id'))
-    if not client_secret or not payment_intent_id:
-        raise RuntimeError(f'HAR UPI checkout/confirm missing PaymentIntent: keys={list(chat_confirm)[:20]}')
-    step('确认ChatGPT订单', 'ok', f'支付意图已生成（{payment_intent_id}）')
+    intent_type, intent_id, client_secret = _checkout_intent(chat_confirm)
+    step('确认ChatGPT订单', 'ok', f'支付对象已生成（{intent_type}）')
     _human_pause('long')
 
     _upi_refresh_browser_risk(
@@ -5445,9 +5681,22 @@ def _run_upi_india_phase(client: UpiHttpClient, *, token: str, step: Any, steps:
         flow='',
         max_age_s=UPI_OBSERVATION_MAX_AGE_S,
         step=step,
-        stage='Stripe PaymentIntent confirm前风控复核',
+        stage='Stripe intent confirm前风控复核',
     )
-    pi_confirm = _stripe_payment_intent_confirm(client, payment_intent_id=payment_intent_id, client_secret=client_secret, confirmation_token=confirm_token, stripe_pk=stripe_pk, stripe_js_id=stripe_js_id, return_url=_har_return_url(cs_id, processor_entity), proxy=provider_proxy)
+    confirm_kwargs = {
+        'client_secret': client_secret,
+        'confirmation_token': confirm_token,
+        'stripe_pk': stripe_pk,
+        'stripe_js_id': stripe_js_id,
+        'return_url': _first_string(chat_confirm, ['confirm_return_url']) or _har_return_url(cs_id, processor_entity),
+        'proxy': provider_proxy,
+    }
+    step('确认UPI支付意图', 'run', '正在向 Stripe 确认 UPI 支付意图')
+    if intent_type == 'setup_intent':
+        pi_confirm = _stripe_setup_intent_confirm(client, setup_intent_id=intent_id, **confirm_kwargs)
+    else:
+        pi_confirm = _stripe_payment_intent_confirm(client, payment_intent_id=intent_id, **confirm_kwargs)
+    _raise_for_upi_intent_failure(pi_confirm)
     # UPI 支付意图 confirm 后即进入 requires_action 并携带二维码
     # （HAR 印度UPI.har #273）；立即推给前端展示，再轮询到账。
     pi_qr = _extract_upi_qr(pi_confirm)
@@ -5455,8 +5704,18 @@ def _run_upi_india_phase(client: UpiHttpClient, *, token: str, step: Any, steps:
         _emit_upi_qr(pi_qr, on_qr_update, step, client)
     step('确认UPI支付意图', 'ok', f'支付状态={_upi_status_cn(pi_confirm.get("status") or "requires_action")}')
     payment_material = pi_confirm
-    if not _extract_redirect_url(payment_material):
-        payment_material = _poll_stripe_payment_intent(client, payment_intent_id=payment_intent_id, client_secret=client_secret, stripe_pk=stripe_pk, steps=steps, proxy=provider_proxy, cancelled=cancelled, max_attempts=UPI_PAYMENT_POLL_ATTEMPTS, on_qr_update=on_qr_update, step=step)
+    if not _upi_copyable_link(payment_material, pi_qr):
+        step('查询UPI支付意图状态', 'run', '正在查询 Stripe 支付意图状态')
+        poll_kwargs = {
+            'client_secret': client_secret, 'stripe_pk': stripe_pk, 'proxy': provider_proxy,
+            'cancelled': cancelled, 'max_attempts': UPI_PAYMENT_POLL_ATTEMPTS,
+            'on_qr_update': on_qr_update, 'step': step,
+        }
+        if intent_type == 'setup_intent':
+            payment_material = _poll_stripe_setup_intent(client, setup_intent_id=intent_id, **poll_kwargs)
+        else:
+            payment_material = _poll_stripe_payment_intent(client, payment_intent_id=intent_id, steps=steps, **poll_kwargs)
+    _raise_for_upi_intent_failure(payment_material)
     payment_qr = _extract_upi_qr(payment_material) or pi_qr or {}
     # Preserve the source extractor's fallback to the legacy UPI deep link;
     # never expose the qr.stripe.com image URL as the payment link.
@@ -5490,9 +5749,12 @@ def _run_upi_india_phase(client: UpiHttpClient, *, token: str, step: Any, steps:
         'promo_campaign_used': str(promo_campaign or UPI_PROMO_COUPON) if use_promo else '',
         'payment_method_types': ['upi'],
         'confirmation_token_id': confirm_token,
-        'payment_intent_id': payment_intent_id,
+        'payment_object_type': intent_type,
+        'payment_intent_id': intent_id if intent_type == 'payment_intent' else '',
+        'setup_intent_id': intent_id if intent_type == 'setup_intent' else '',
         'elements_session_id': str(elements.get('session_id') or ''),
-        'payment_intent_status': final_state,
+        'payment_intent_status': final_state if intent_type == 'payment_intent' else '',
+        'setup_intent_status': final_state if intent_type == 'setup_intent' else '',
         'qr_url': str(payment_qr.get('qr_url') or ''),
         'hosted_instructions_url': str(payment_qr.get('hosted_instructions_url') or ''),
         'upi_deep_link': str(payment_qr.get('upi_deep_link') or ''),

@@ -39,6 +39,7 @@ TERMINAL_RESULT_CODES = {
     "ideal_zero_amount_not_confirmed", "promo_not_applied", "promotion_not_applied",
     "wallet_method_unavailable", "wallet_method_unavailable_env",
     "upi_payment_setup_declined", "upi_risk_blocked",
+    "upi_billing_invalid", "upi_tls_configuration_error",
 }
 
 

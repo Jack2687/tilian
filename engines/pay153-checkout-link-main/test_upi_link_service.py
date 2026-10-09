@@ -317,7 +317,7 @@ class UpiHarContractTests(unittest.TestCase):
         self.assertEqual(query["checkout_session_id"], "cs_live_fixture")
         self.assertEqual(query["_stripe_version"], upi.STRIPE_CUSTOM_VERSION)
 
-    def test_oaics_elements_request_uses_momo_contract(self):
+    def test_oaics_elements_request_uses_base_har_contract(self):
         client = RecordingClient()
 
         def request(method, url, **kwargs):
@@ -342,9 +342,9 @@ class UpiHarContractTests(unittest.TestCase):
         self.assertEqual(result["session_id"], "oaics_elements_fixture")
         query = dict(parse_qsl(urlparse(client.calls[0]["url"]).query, keep_blank_values=True))
         self.assertEqual(query["customer_session_client_secret"], "cuss_fixture")
-        self.assertEqual(query["_stripe_version"], upi.STRIPE_CUSTOM_VERSION)
-        self.assertEqual(query["client_betas[0]"], "custom_checkout_server_updates_1")
-        self.assertEqual(query["client_betas[1]"], "custom_checkout_manual_approval_1")
+        self.assertEqual(query["_stripe_version"], upi.STRIPE_VERSION)
+        self.assertNotIn("client_betas[0]", query)
+        self.assertNotIn("client_betas[1]", query)
         self.assertEqual(query["browser_timezone"], "Asia/Kolkata")
         self.assertEqual(query["locale"], "hi-IN")
         self.assertEqual(query["deferred_intent[payment_method_types][0]"], "card")
@@ -752,21 +752,21 @@ class UpiHarContractTests(unittest.TestCase):
 
     def test_auto_mode_detects_cs_live_vs_oaics(self):
         client = RecordingClient()
-        detected: list[str] = []
         checkout_ui_modes: list[str] = []
 
         def request(method, url, **kwargs):
             if url.endswith("/backend-api/payments/checkout"):
                 body = kwargs.get("json_body") or {}
-                # 建单请求在 auto 模式下应显式要求 custom
-                self.assertEqual(body.get("checkout_ui_mode"), "custom")
+                # Native auto mode lets the server select the checkout type.
+                self.assertNotIn("checkout_ui_mode", body)
                 return 200, json.dumps(
                     {
-                        "checkout_session_id": "cs_live_fixture",
+                        "checkout_session_id": session_id,
                         "processor_entity": "openai_llc",
                         "checkout_ui_mode": "custom",
                         "publishable_key": "pk_test_fixture",
-                        "client_secret": "cs_live_fixture_secret_value",
+                        "client_secret": session_id + "_secret_value" if session_id.startswith('cs_') else None,
+                        "customer_session_client_secret": "cuss_fixture" if session_id.startswith('oaics_') else None,
                         "payment_method_types": ["upi"],
                         "promo_campaign": {"promo_campaign_id": "plus-1-month-free"},
                         "checkout_state": {"total": {"total": {"minorUnitsAmount": 0}}},
@@ -793,18 +793,18 @@ class UpiHarContractTests(unittest.TestCase):
         with ExitStack() as stack:
             for name, replacement in replacements:
                 stack.enter_context(patch.object(upi, name, replacement))
-            upi._run_upi_attempt(
-                client,
-                "header.payload.signature",
-                lambda *args: None,
-                [],
-                promotion_proxy=client.base_proxy,
-                billing=fixture_billing(),
-                use_promo=True,
-                checkout_ui_mode="auto",
-            )
-        # cs_live_ 前缀 → 走 custom (Stripe Custom Checkout / payment_pages) 路径
-        self.assertEqual(checkout_ui_modes, ["custom"])
+            for session_id in ('cs_live_fixture', 'cs_test_fixture', 'oaics_fixture'):
+                upi._run_upi_attempt(
+                    client,
+                    "header.payload.signature",
+                    lambda *args: None,
+                    [],
+                    promotion_proxy=client.base_proxy,
+                    billing=fixture_billing(),
+                    use_promo=True,
+                    checkout_ui_mode="auto",
+                )
+        self.assertEqual(checkout_ui_modes, ["custom", "custom", "deferred"])
 
     def test_qr_event_forwards_stripe_urls_without_inline_base64(self):
         # 现行实现（见 _emit_upi_qr docstring）：只透传 Stripe 的二维码 URL，
@@ -1349,7 +1349,7 @@ class UpiHar20260917AlignmentTests(unittest.TestCase):
         self.assertEqual(billing["line1"], caller["line1"])
         self.assertEqual(billing["country"], "IN")
 
-    def test_non_indian_or_incomplete_address_is_replaced_by_random_indian(self):
+    def test_invalid_entered_address_is_rejected_instead_of_replaced(self):
         for caller in (
             {
                 "name": "Alex Morgan",
@@ -1361,7 +1361,7 @@ class UpiHar20260917AlignmentTests(unittest.TestCase):
                     "country": "US",
                 },
             },
-            {"name": "No Address"},
+            {"name": "Partial Address", "address": {"city": "Mumbai"}},
             {
                 "address": {
                     "line1": "1 Somewhere",
@@ -1371,14 +1371,8 @@ class UpiHar20260917AlignmentTests(unittest.TestCase):
                 },
             },
         ):
-            billing = upi.build_upi_billing("buyer@example.com", caller)
-            self.assertEqual(billing["country"], "IN")
-            # 输出用邦名全称（与 HAR 的 "state": "Punjab" 一致），也接受两字母邦码
-            self.assertIn(billing["state"], set(upi.INDIA_STATE_NAMES.values()) | {"MH", "KL", "KA"})
-            self.assertRegex(billing["postal_code"], r"^\d{6}$")
-            self.assertIn(billing["city"].lower(), upi._known_indian_cities())
-            self.assertNotEqual(billing["city"], "San Francisco")
-            self.assertNotEqual(billing["city"], "Nowhere")
+            with self.assertRaisesRegex(ValueError, 'UPI 账单地址'):
+                upi.build_upi_billing("buyer@example.com", caller)
 
     def test_every_extract_run_resolves_a_fresh_random_indian_billing(self):
         captured: list[dict] = []
@@ -1414,13 +1408,13 @@ class UpiHar20260917AlignmentTests(unittest.TestCase):
         # 全随机：多次提链不应始终落在同一套地址
         self.assertGreater(len({(b["line1"], b["postal_code"]) for b in captured}), 1)
 
-    def test_random_billing_merges_resolver_pool(self):
-        # resolver 的印度地标池应能被并入随机面（取得到就至少有一行来自它）
+    def test_resolver_address_is_already_in_the_unique_billing_pool(self):
         resolver_row = upi._resolver_indian_address_row()
         if resolver_row is None:
             self.skipTest("billing_address_resolver 不可用")
         self.assertRegex(resolver_row[2], r"^[A-Z]{2}$")
         self.assertRegex(resolver_row[3], r"^\d{6}$")
+        self.assertEqual(upi._upi_billing_address_rows().count(resolver_row), 1)
 
 
 class UpiGit5ProtocolRailTests(unittest.TestCase):
@@ -1744,14 +1738,9 @@ class UpiRiskBlockedClassificationTests(unittest.TestCase):
 
 
 class UpiGit5CheckoutPayloadTests(unittest.TestCase):
-    """git5 的建单请求体必须与源站同形。
+    """Auto checkout uses the native request captured at HAR entry 438."""
 
-    源站对 upi-git3/git4/git5 明确不加 cancel_url / check_card_proxy
-    （app.py:1034-1041：「mirrors the browser HAR exactly」）；这两个字段只属于
-    其它 rail。带上它们会让建单偏离 git5 的 HAR 形状。
-    """
-
-    def _create_body(self, rail: str, use_promo: bool = True) -> dict:
+    def _create_body(self, rail: str, use_promo: bool = True, ui_mode: str = 'auto') -> dict:
         client = RecordingClient()
         captured: dict = {}
 
@@ -1794,6 +1783,7 @@ class UpiGit5CheckoutPayloadTests(unittest.TestCase):
                 billing=fixture_billing(),
                 use_promo=use_promo,
                 upi_rail=rail,
+                checkout_ui_mode=ui_mode,
             )
         return captured
 
@@ -1801,12 +1791,18 @@ class UpiGit5CheckoutPayloadTests(unittest.TestCase):
         body = self._create_body(upi.UPI_GIT5_RAIL)
         self.assertNotIn('cancel_url', body)
         self.assertNotIn('check_card_proxy', body)
-        self.assertEqual(body['checkout_ui_mode'], 'custom')
+        self.assertNotIn('checkout_ui_mode', body)
 
-    def test_browser_rail_keeps_the_legacy_create_fields(self):
+    def test_browser_auto_create_matches_native_har_fields(self):
         body = self._create_body('upi')
-        self.assertEqual(body.get('cancel_url'), 'https://chatgpt.com/')
-        self.assertTrue(body.get('check_card_proxy'))
+        self.assertNotIn('cancel_url', body)
+        self.assertNotIn('check_card_proxy', body)
+        self.assertNotIn('checkout_ui_mode', body)
+
+    def test_explicit_checkout_mode_is_preserved(self):
+        for requested, sent in (('custom', 'custom'), ('hosted', 'custom'), ('deferred', 'deferred')):
+            with self.subTest(requested=requested):
+                self.assertEqual(self._create_body('upi', ui_mode=requested)['checkout_ui_mode'], sent)
 
     def test_create_still_carries_the_promo_campaign(self):
         body = self._create_body(upi.UPI_GIT5_RAIL)

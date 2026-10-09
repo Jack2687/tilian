@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from typing import Any
 
@@ -19,6 +20,7 @@ UPI_LOG_STAGE_MAP = {
     "代理准备": "proxy_prepare",
     "登录会话刷新": "auth",
     "优惠资格预检": "promo",
+    "账单地址": "billing",
     "重新建单": "checkout",
     "重新建单重试": "checkout",
     "页面预热": "warmup",
@@ -43,7 +45,10 @@ UPI_LOG_STAGE_MAP = {
     "确认ChatGPT订单": "confirm",
     "确认UPI支付意图": "confirm",
     "ChatGPT订单风控审批": "approve",
+    "查询UPI支付设置状态": "poll",
+    "查询UPI支付意图状态": "poll",
     "查询0元支付状态": "poll",
+    "payment intent poll": "poll",
     "启动UPI自定义通道": "gateway",
     "生成支付链接和二维码": "gateway",
 }
@@ -96,10 +101,18 @@ def main() -> int:
     if str(args.billing_json or "").strip():
         try:
             parsed = json.loads(args.billing_json)
-            if isinstance(parsed, dict):
-                billing.update(parsed)
-        except json.JSONDecodeError:
-            result = {"ok": False, "link": "", "error": "UPI 账单参数格式错误，请检查账单 JSON 内容"}
+            if not isinstance(parsed, dict):
+                raise ValueError("billing JSON must be an object")
+            billing.update(parsed)
+        except ValueError:
+            result = {
+                "ok": False,
+                "link": "",
+                "error": "UPI 账单参数格式错误，请提供有效的 JSON 对象",
+                "provider": "upi",
+                "reason_code": "upi_billing_invalid",
+                "retryable": False,
+            }
             print(json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
             return 1
 
@@ -145,6 +158,21 @@ def main() -> int:
             print(json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
             return 1
 
+    last_step: dict[str, str] = {}
+
+    def on_step(steps: list[dict[str, str]]) -> None:
+        nonlocal last_step
+        if steps:
+            last_step = dict(steps[-1])
+        emit_step(steps)
+
+    def emit_failure(message: str) -> None:
+        # The adapter/Worker displays the final stage log. Preserve completed
+        # approval events and close the actual subsequent operation as failed.
+        # Do not guess a stage from generic_decline or replace its reason code.
+        if last_step and last_step.get("status") != "fail":
+            emit_step([{**last_step, "status": "fail", "detail": message}])
+
     try:
         result = extract_upi_link(
             str(args.at or "").strip(),
@@ -153,7 +181,7 @@ def main() -> int:
             promotion_proxy=str(args.promotion_proxy or "").strip(),
             billing=billing,
             fingerprint=fingerprint,
-            on_step=emit_step,
+            on_step=on_step,
             on_qr_update=emit_qr_event,
             use_promo=True,
             promo_campaign=str(args.promo_campaign_id or "").strip() or None,
@@ -169,20 +197,27 @@ def main() -> int:
             upi_har_context=bool(args.upi_har_context),
         )
         link = str(
-            result.get("provider_redirect_url")
+            result.get("hosted_instructions_url")
+            or result.get("hostedInstructionsUrl")
+            or result.get("provider_redirect_url")
             or result.get("long_url")
             or result.get("url")
+            or result.get("link")
             or ""
         ).strip()
+        ok = result.get("ok") is True and bool(link)
+        reason = str(result.get("reason_code") or "").strip()
         output = dict(result)
         output.update(
             {
-                "ok": bool(result.get("ok")) and bool(link),
-                "link": link,
+                "ok": ok,
+                "link": link if ok else "",
                 "provider": "upi",
-                "reason_code": "" if link else "upi_link_missing",
+                "reason_code": "" if ok else reason or ("upi_link_missing" if not link else "upi_extract_failed"),
             }
         )
+        if not ok:
+            emit_failure(str(output.get("error") or "UPI 提链失败，未返回有效支付链接"))
         print(json.dumps(output, ensure_ascii=False, separators=(",", ":")), flush=True)
         return 0 if output["ok"] else 1
     except Exception as exc:
@@ -197,7 +232,22 @@ def main() -> int:
             raw_detail = raw_message
         message = localize_upi_error(raw_message)[:1200]
         lower = (raw_message + " " + message).lower()
-        if (
+        if raw_message.startswith("UPI 账单地址") or "upi billing invalid" in lower:
+            reason = "upi_billing_invalid"
+            retryable = False
+            message = raw_message if raw_message.startswith("UPI 账单地址") else "UPI 账单地址无效，请检查国家、城市、邦及邮编"
+        elif (
+            "upi 本地证书配置错误" in lower
+            or re.search(r"\bcurl\s*:?\s*\(77\)", lower)
+            or "error adding trust anchors" in lower
+            or "error setting certificate verify locations" in lower
+        ):
+            # Loading the local CA bundle fails before the remote connection
+            # can be verified. Rotating a healthy proxy cannot fix this.
+            reason = "upi_tls_configuration_error"
+            retryable = False
+            message = "UPI 本地证书配置错误：请求库无法加载 CA 证书，请检查运行环境（curl 77）"
+        elif (
             "账号无优惠资格" in message
             or "this promotion is not available" in lower
             or "promo not eligible" in lower
@@ -224,6 +274,9 @@ def main() -> int:
             or "upi_payment_setup_declined" in lower
             or "支付设置被 stripe 拒绝" in message.lower()
             or "upi custom checkout submission failed" in lower
+            or "upi stripe intent failed" in lower
+            or "payment_method_provider_decline" in lower
+            or "upi stripe 支付设置失败" in lower
         ):
             reason = "upi_payment_setup_declined"
             # Stripe has already rejected the payment setup for this
@@ -231,6 +284,9 @@ def main() -> int:
             # generic_decline as terminal in the distributed worker; a new
             # proxy/fingerprint must not be used to repeatedly submit a
             # blocked payment attempt. The original diagnostic is retained.
+            retryable = False
+        elif "upi checkout/confirm" in lower and "intent" in lower:
+            reason = "upi_checkout_intent_invalid"
             retryable = False
         elif (
             "deferred-intent prerequisites missing" in lower
@@ -299,6 +355,7 @@ def main() -> int:
             "reason_code": reason,
             "retryable": retryable,
         }
+        emit_failure(message)
         print(json.dumps(output, ensure_ascii=False, separators=(",", ":")), flush=True)
         return 1
 
