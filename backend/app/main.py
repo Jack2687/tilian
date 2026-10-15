@@ -9,14 +9,14 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
 
@@ -32,6 +32,7 @@ from .proxy import format_proxy_pool, normalize_proxy_pool, normalize_proxy_url
 from .schemas import AccountParse, AdminCardStatusInput, AdminUserUpdate, AnnouncementInput, BlikCodeInput, CardCheck, CardFuseInput, CardGenerateInput, CardImport, ConcurrencyConfig, LoginInput, ProxyPoolsConfig, QrRefreshInput, RegisterInput, SUPPORTED_MODES, TaskCreate, UserPolicyConfig
 from .security import card_hash, issue_user_token, mask_owner, owner_key, password_hash, password_verify, verify_user_token
 from .services.tasks import TaskService
+from .services.concurrency import effective_concurrency, load_concurrency_config
 from .services.engine_sessions import queue_engine_control
 from .engine_protocol import CONTROL_EVENT
 
@@ -121,14 +122,14 @@ async def live() -> dict[str, Any]:
     return {"ok": True, "service": "api", "version": "2.0.0"}
 
 
-def user_public(user: User) -> dict[str, Any]:
+def user_public(user: User, *, concurrency: int) -> dict[str, Any]:
     return {
         "id": user.id,
         "username": user.username,
         "displayName": user.display_name or user.username,
         "role": user.role,
         "status": user.status,
-        "taskConcurrency": user.task_concurrency,
+        "taskConcurrency": concurrency,
         "maxAccountsPerTask": user.max_accounts_per_task,
         "allowFusion": user.allow_fusion,
         "notes": user.notes or "",
@@ -173,18 +174,19 @@ async def register(body: RegisterInput, session: AsyncSession = Depends(get_sess
     username = body.username.strip().lower()
     if await session.scalar(select(User.id).where(User.username == username)):
         raise HTTPException(status_code=409, detail="用户名已存在")
+    concurrency = effective_concurrency(await load_concurrency_config(session))
     user = User(
         username=username,
         password_hash=password_hash(body.password),
         display_name=body.displayName.strip() or username,
-        task_concurrency=int(values.get("defaultConcurrency", 3)),
+        task_concurrency=concurrency,
         max_accounts_per_task=int(values.get("maxAccountsPerTask", 100)),
         allow_fusion=bool(values.get("allowFusion", True)),
     )
     session.add(user)
     await session.commit()
     await session.refresh(user)
-    return {"token": issue_user_token(user.id, user.token_version), "user": user_public(user)}
+    return {"token": issue_user_token(user.id, user.token_version), "user": user_public(user, concurrency=concurrency)}
 
 
 @app.post("/api/v1/auth/login")
@@ -197,12 +199,14 @@ async def login(body: LoginInput, session: AsyncSession = Depends(get_session)) 
         raise HTTPException(status_code=403, detail="账号已被管理员停用")
     user.last_login_at = utcnow()
     await session.commit()
-    return {"token": issue_user_token(user.id, user.token_version), "user": user_public(user)}
+    concurrency = effective_concurrency(await load_concurrency_config(session))
+    return {"token": issue_user_token(user.id, user.token_version), "user": user_public(user, concurrency=concurrency)}
 
 
 @app.get("/api/v1/auth/me")
-async def me(user: User = Depends(get_current_user)) -> dict[str, Any]:
-    return {"user": user_public(user)}
+async def me(user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    concurrency = effective_concurrency(await load_concurrency_config(session))
+    return {"user": user_public(user, concurrency=concurrency)}
 
 
 @app.get("/health/ready")
@@ -251,8 +255,8 @@ async def metrics() -> Response:
 async def meta(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     if settings.execution_mode == "legacy":
         return await legacy_client.meta()
-    config = await session.get(RuntimeConfig, "concurrency")
-    concurrency = config.value if config else {"default": 3, "vip": 10, "globalLimit": 100}
+    concurrency = await load_concurrency_config(session)
+    limit = effective_concurrency(concurrency)
     proxy_config = await session.get(RuntimeConfig, "proxy_pools")
     proxy_channels = proxy_config.value.get("channels", {}) if proxy_config and isinstance(proxy_config.value, dict) else {}
     proxy_status = {}
@@ -269,7 +273,8 @@ async def meta(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
             {"id": key, "name": name, "description": "异步集群提链"}
             for key, name in (("paypal", "PayPal"), ("gopay", "GoPay"), ("gcash", "GCash"), ("momo", "MoMo"), ("upi", "UPI"), ("blik", "BLIK"), ("pix", "PIX"), ("ideal", "iDEAL"), ("card", "直卡"))
         ],
-        "engine": {"defaultConcurrency": int(concurrency.get("default", 3)), "maxConcurrency": int(concurrency.get("globalLimit", 100)), "proxyPools": proxy_status, "ha": {"enabled": True, "mode": "distributed", "ready": True}},
+        "engine": {"defaultConcurrency": limit, "maxConcurrency": limit, "proxyPools": proxy_status, "ha": {"enabled": True, "mode": "distributed", "ready": True}},
+        "limits": {"userConcurrency": limit, "maxConcurrency": limit},
         "serverTime": int(time.time() * 1000),
     }
 
@@ -676,13 +681,29 @@ async def refresh_qr(task_id: str, body: QrRefreshInput, x_tilian_cdk: str | Non
 
 
 @app.get("/api/v1/tasks/{task_id}/events")
-async def task_events(task_id: str, x_tilian_cdk: str | None = Header(default=None, alias="X-Tilian-CDK"), user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)) -> StreamingResponse:
+async def task_events(
+    task_id: str,
+    x_tilian_cdk: str | None = Header(default=None, alias="X-Tilian-CDK"),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+    after_event_id: Annotated[str | None, Query(alias="afterEventId", max_length=64)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> StreamingResponse:
     cdk = owner_header(x_tilian_cdk)
     await assert_user_card(session, cdk, user)
     task = await session.scalar(select(Task).where(Task.id == task_id, Task.owner_key == owner_key(cdk)))
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    events = (await session.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id, TaskEvent.event_type != CONTROL_EVENT).order_by(TaskEvent.created_at.asc()).limit(200))).all()
+    query = select(TaskEvent).where(TaskEvent.task_id == task_id, TaskEvent.event_type != CONTROL_EVENT)
+    if after_event_id is not None:
+        cursor = await session.scalar(query.where(TaskEvent.event_id == after_event_id))
+        if cursor is None:
+            raise HTTPException(status_code=400, detail="事件游标无效，请重新加载任务日志")
+        query = query.where(or_(
+            TaskEvent.created_at > cursor.created_at,
+            and_(TaskEvent.created_at == cursor.created_at, TaskEvent.event_id > cursor.event_id),
+        ))
+    events = (await session.scalars(query.order_by(TaskEvent.created_at.asc(), TaskEvent.event_id.asc()).limit(limit))).all()
 
     async def stream():
         for event in events:
@@ -819,10 +840,11 @@ async def admin_users(
         count_query = count_query.where(condition)
     total = int(await session.scalar(count_query) or 0)
     users = []
+    concurrency = effective_concurrency(await load_concurrency_config(session))
     for user in (await session.scalars(query.offset(offset).limit(limit))).all():
         tasks_count = int(await session.scalar(select(func.count()).select_from(Task).where(Task.user_id == user.id)) or 0)
         cards_count = int(await session.scalar(select(func.count()).select_from(QuotaCard).where(QuotaCard.owner_user_id == user.id)) or 0)
-        users.append({**user_public(user), "taskCount": tasks_count, "cardCount": cards_count, "online": bool(user.last_login_at and (datetime.now(timezone.utc) - user.last_login_at).total_seconds() < 900)})
+        users.append({**user_public(user, concurrency=concurrency), "taskCount": tasks_count, "cardCount": cards_count, "online": bool(user.last_login_at and (datetime.now(timezone.utc) - user.last_login_at).total_seconds() < 900)})
     return {"items": users, "total": total, "limit": limit, "offset": offset}
 
 
@@ -832,6 +854,8 @@ async def update_admin_user(user_id: int, body: AdminUserUpdate, authorization: 
     user = await session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
+    if body.taskConcurrency is not None:
+        raise HTTPException(status_code=400, detail="普通用户并发统一管理，请在并发配置中修改")
     values = body.model_dump(exclude_none=True, by_alias=True)
     mapping = {"displayName": "display_name", "taskConcurrency": "task_concurrency", "maxAccountsPerTask": "max_accounts_per_task", "allowFusion": "allow_fusion", "notes": "notes", "status": "status"}
     for key, value in values.items():
@@ -839,20 +863,26 @@ async def update_admin_user(user_id: int, body: AdminUserUpdate, authorization: 
     user.token_version += 1 if "status" in values and values["status"] == "disabled" else 0
     await add_audit(session, "user.update", "更新用户配置", userId=user.id, changes=values)
     await session.commit()
-    return {"ok": True, "user": user_public(user)}
+    concurrency = effective_concurrency(await load_concurrency_config(session))
+    return {"ok": True, "user": user_public(user, concurrency=concurrency)}
 
 
 @app.get("/api/v1/admin/user-policy")
 async def admin_user_policy(authorization: str | None = Header(default=None, alias="Authorization"), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     require_admin(authorization)
     config = await session.get(RuntimeConfig, "user_policy")
-    return UserPolicyConfig(**(config.value if config else {})).model_dump(by_alias=True)
+    values = UserPolicyConfig(**(config.value if config else {})).model_dump(by_alias=True)
+    values["defaultConcurrency"] = (await load_concurrency_config(session))["default"]
+    return values
 
 
 @app.put("/api/v1/admin/user-policy")
 async def update_admin_user_policy(body: UserPolicyConfig, authorization: str | None = Header(default=None, alias="Authorization"), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     require_admin(authorization)
     values = body.model_dump(by_alias=True)
+    # Older clients still send their cached registration default. The shared
+    # concurrency page is the only writer of this setting.
+    values["defaultConcurrency"] = (await load_concurrency_config(session))["default"]
     config = await session.get(RuntimeConfig, "user_policy")
     if config:
         config.value = values
@@ -950,8 +980,7 @@ async def public_announcement(session: AsyncSession = Depends(get_session)) -> d
 @app.get("/api/v1/admin/concurrency")
 async def admin_concurrency(authorization: str | None = Header(default=None, alias="Authorization"), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     require_admin(authorization)
-    config = await session.get(RuntimeConfig, "concurrency")
-    return {"default": 3, "vip": 10, "globalLimit": 100, **(config.value if config else {})}
+    return await load_concurrency_config(session)
 
 
 @app.put("/api/v1/admin/concurrency")

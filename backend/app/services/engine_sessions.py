@@ -28,10 +28,20 @@ async def persist_engine_event(task_id: str, item_index: int, attempt: int, mess
             return
         apply_engine_event(item, message)
         # The public event stream contains only projected fields, never stdin controls.
+        payload = {
+            "stage": item.stage,
+            "detail": item.stage_detail,
+            "status": item.status,
+            "attempt": item.attempt,
+        }
+        # An individual stage may fail and recover while the task is still running.
+        # Keep its outcome separate from the task item's lifecycle status.
+        if message.get("event") == "stage":
+            payload["stageStatus"] = str(message.get("status") or "")[:32]
         session.add(TaskEvent(
             event_id=uuid.uuid4().hex, task_id=task_id, item_index=item_index,
             event_type="task.item.progress.v1",
-            payload={"stage": item.stage, "detail": item.stage_detail, "status": item.status},
+            payload=payload,
         ))
         await session.commit()
 

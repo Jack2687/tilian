@@ -57,7 +57,8 @@ async def test_bad_pool_is_rejected_before_card_or_quota_changes(monkeypatch):
 
 @pytest.mark.parametrize("field", ["sessionToken", "session_token", "sessionCookie", "session_cookie", "__Secure-next-auth.session-token"])
 @pytest.mark.asyncio
-async def test_session_json_import_preserves_nested_per_account_session(field):
+async def test_session_json_import_preserves_nested_per_account_session(field, monkeypatch):
+    monkeypatch.setattr("app.main.settings.execution_mode", "distributed")
     data = {"account": {"access_token": "test-access-token"}, "tokens": {field: "session-secret"}, "user": {"email": "account@example.test"}}
     parsed = await parse_accounts(AccountParse(text=json.dumps(data, indent=2)), _user=None)
     assert parsed["count"] == 1
@@ -83,6 +84,9 @@ async def test_task_keeps_session_only_in_encrypted_account_credential(monkeypat
         task = None
 
         async def scalar(self, _query):
+            return None
+
+        async def get(self, *_args):
             return None
 
         def add(self, row):

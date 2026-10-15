@@ -15,6 +15,7 @@ from .proxy import normalize_proxy_pool, normalize_proxy_url
 from .python_runtime import resolve_python
 from .engine_protocol import public_engine_extra
 from .wallet_results import wallet_extra
+from .upi_results import clear_upi_payment_material, upi_delivery_failure
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -125,10 +126,17 @@ def _stripe_qr_image(url: str) -> bool:
 
 
 def _stripe_upi_hosted_instructions(url: str) -> bool:
-    if not url:
+    if not url or any(character.isspace() or ord(character) < 32 for character in url):
         return False
-    parsed = urlsplit(url)
-    return parsed.netloc.lower() == "payments.stripe.com" and parsed.path.startswith("/upi/instructions/")
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and parsed.netloc.lower() == "payments.stripe.com"
+        and re.fullmatch(r"/upi/instructions/[A-Za-z0-9_-]+", parsed.path) is not None
+    )
 
 
 class EngineAdapter:
@@ -446,6 +454,8 @@ class EngineAdapter:
             result["error"] = forced_error or existing_error or default_error
             existing_reason = _text(result.get("reason_code")) or _text(extra.get("reason_code")) or _text(extra.get("error_stage"))
             result["reason_code"] = existing_reason or default_reason
+            if mode == "upi":
+                return clear_upi_payment_material(result)
             return result
 
         label = {
@@ -459,6 +469,14 @@ class EngineAdapter:
             "pix": "PIX",
             "ideal": "ideal",
         }.get(mode, mode or "引擎")
+
+        if mode == "upi":
+            delivery_failure = upi_delivery_failure(source)
+            if delivery_failure:
+                reason, error = delivery_failure
+                result["reason_code"] = reason
+                result["retryable"] = False
+                return fail(error, reason, error)
 
         if not engine_ok:
             return fail(f"{label} 提链失败", f"{mode or 'engine'}_engine_failed")
@@ -634,7 +652,9 @@ class EngineAdapter:
                                 final = with_ready_qr(final, message)
                                 completed.set()
                     elif isinstance(message.get("ok"), bool) and final is None:
-                        final = message
+                        # Reject invalid UPI material before publishing a
+                        # result_pending event or waiting for its QR image.
+                        final = self._normalize_result(mode, message, params) if mode == "upi" else message
                         if awaiting_initial_qr(final) and latest_qr:
                             final = with_ready_qr(final, latest_qr)
                         if awaiting_initial_qr(final):

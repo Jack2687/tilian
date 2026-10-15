@@ -7,7 +7,8 @@ import {
   FileUp, MessageCircle, UsersRound, WalletCards, X, TestTube2, ReceiptText, QrCode, ExternalLink,
 } from "lucide-vue-next";
 import { api, ApiError, getAuthToken, setAuthToken } from "./api/client";
-import type { Channel, MetaResponse, StatsResponse, Task, User } from "./types";
+import type { Channel, MetaResponse, StatsResponse, Task, TaskEvent, User } from "./types";
+import { RUNTIME_SETTINGS_CHANGED_KEY } from "./runtimeSettings";
 import AdminView from "./views/AdminView.vue";
 import ApiDocsView from "./views/ApiDocsView.vue";
 import AuthView from "./views/AuthView.vue";
@@ -103,7 +104,13 @@ const initialChannelDraft = defaultChannelDraft(
     forceZero: undefined,
   }),
 );
-const channelDrafts = ref<Record<string, ChannelDraft>>({ [selectedMode.value]: initialChannelDraft });
+const channelDrafts = ref<Record<string, ChannelDraft>>({
+  ...Object.fromEntries(Object.entries(workspaceDraft.channels || {}).map(([mode, draft]) => [mode, defaultChannelDraft(mode, draft)])),
+  [selectedMode.value]: initialChannelDraft,
+});
+const initializedConcurrencyModes = new Set(Object.entries(workspaceDraft.channels || {})
+  .filter(([, draft]) => draft.concurrency != null).map(([mode]) => mode));
+if (!workspaceDraft.channels && workspaceDraft.concurrency != null) initializedConcurrencyModes.add(selectedMode.value);
 
 const sidebarOpen = ref(true);
 const mobileNavOpen = ref(false);
@@ -151,7 +158,13 @@ const paymentPlans = ref<Array<{ id: string; label: string; quota: number; money
 const plusOpen = ref(false);
 const plusRecords = ref<Array<{ email: string; t: string; taskId: string }>>([]);
 const eventsOpen = ref<string | null>(null);
-const taskEvents = ref<Array<{ eventId: string; type: string; itemIndex?: number; payload?: Record<string, unknown>; createdAt: string }>>([]);
+const taskEvents = ref<TaskEvent[]>([]);
+const eventsError = ref("");
+const eventItemIndex = ref<number | null>(null);
+const visibleTaskEvents = computed(() => taskEvents.value.filter((event) => eventItemIndex.value == null || event.itemIndex == null || event.itemIndex === eventItemIndex.value));
+const eventTask = computed(() => tasks.value.find((task) => task.id === eventsOpen.value));
+let eventsRequestVersion = 0;
+let eventsPollTimer: number | null = null;
 const expandedTaskItems = ref<Record<string, boolean>>({});
 const collapsedTasks = ref<Record<string, boolean>>({});
 const observedTaskStatuses = ref<Record<string, string>>({});
@@ -160,6 +173,8 @@ const qrOpen = ref(false);
 const qrSrc = ref("");
 const qrTitle = ref("提链二维码");
 let pollTimer: number | null = null;
+let settingsPollTimer: number | null = null;
+let settingsRefresh: Promise<void> | null = null;
 let toastTimer: number | null = null;
 let autoParseTimer: number | null = null;
 let lastParsedImport = "";
@@ -213,13 +228,11 @@ const concurrencyMax = computed(() => {
   const configured = meta.value;
   if (!configured) return 10;
   const limits = configured?.limits;
+  const effectiveMax = Number(limits?.maxConcurrency);
+  if (Number.isFinite(effectiveMax) && effectiveMax > 0) return Math.max(1, Math.floor(effectiveMax));
   const candidates = [
-    limits?.cdkConcurrency,
-    cardState.value?.maxConcurrency,
-    limits?.userConcurrency,
-    configured?.user?.taskConcurrency,
-    currentUser.value?.taskConcurrency,
-    limits?.maxConcurrency,
+    limits?.cdkConcurrency ?? cardState.value?.maxConcurrency,
+    limits?.userConcurrency ?? configured?.user?.taskConcurrency ?? currentUser.value?.taskConcurrency,
     configured?.engine.maxConcurrency,
   ]
     .map((value) => Number(value))
@@ -280,6 +293,12 @@ const stageNames: Record<string, string> = {
   engine_timeout: "引擎执行超时",
   engine_no_result: "引擎未返回结果",
   engine_exception: "引擎执行异常",
+  engine_bootstrap: "引擎启动失败",
+  bank_authorization: "等待银行授权",
+  queued: "等待执行",
+  canceled: "任务已取消",
+  failed: "执行失败",
+  success: "执行成功",
   completed: "执行完成",
 };
 
@@ -318,12 +337,24 @@ function taskStatusHint(task: Task) {
 }
 
 function itemDetailsOpen(taskId: string, item: Task["items"][number]) {
-  return isFailedTaskItem(item) || expandedTaskItems.value[taskItemKey(taskId, item.index)] === true;
+  return expandedTaskItems.value[taskItemKey(taskId, item.index)] ?? isFailedTaskItem(item);
 }
 
-function toggleItemDetails(taskId: string, itemIndex: number) {
-  const key = taskItemKey(taskId, itemIndex);
-  expandedTaskItems.value[key] = !expandedTaskItems.value[key];
+function toggleItemDetails(taskId: string, item: Task["items"][number]) {
+  const key = taskItemKey(taskId, item.index);
+  expandedTaskItems.value[key] = !itemDetailsOpen(taskId, item);
+}
+
+function itemStageDetail(item: Task["items"][number]) {
+  if (item.stageDetail) return item.stageDetail;
+  if (item.error) return item.error;
+  return ({ queued: "正在等待 Worker 处理", running: "任务正在执行，等待下一条阶段记录", failed: "任务执行失败，请查看执行日志", timed_out: "任务执行超时", canceled: "任务已取消", success: "任务执行成功", plus_success: "已确认到账", waiting_blik: "等待输入 BLIK 动态码", waiting_plus: "等待到账确认" } as Record<string, string>)[item.status] || "暂无阶段说明";
+}
+
+function formatTaskTime(value?: number | string | null) {
+  if (value == null || value === "") return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
 }
 
 function taskExpanded(taskId: string) {
@@ -365,8 +396,22 @@ function eventTypeLabel(type: string) {
   return ({
     "task.created.v1": "任务已创建",
     "task.item.started.v1": "账号开始执行",
+    "task.item.progress.v1": "阶段更新",
     "task.item.completed.v1": "账号执行结束",
+    "task.canceled.v1": "任务已取消",
+    "task.completed.v1": "任务执行结束",
   } as Record<string, string>)[type] || type;
+}
+
+function eventStatusLabel(event: TaskEvent) {
+  const payload = event.payload || {};
+  const stageStatus = String(payload.stageStatus || "");
+  if (stageStatus) return ({ run: "进行中", ok: "已完成", warn: "警告", fail: "失败", err: "失败", error: "失败", info: "信息", skip: "已跳过" } as Record<string, string>)[stageStatus] || stageStatus;
+  if (payload.retry === true) return "等待重试";
+  if (payload.status === "queued") return "等待执行";
+  if (payload.status) return statusLabel(String(payload.status));
+  if (typeof payload.ok === "boolean") return payload.ok ? "成功" : "本次尝试失败";
+  return "";
 }
 
 function maskToken(value: string) {
@@ -396,15 +441,44 @@ function normalizeConcurrency() {
   if (concurrency.value !== next) concurrency.value = next;
 }
 
-async function loadOverview() {
-  const [metaResult, statsResult, heatResult, announcementResult] = await Promise.allSettled([api.meta(), api.stats(), api.recentSuccess(), api.announcement()]);
-  if (metaResult.status === "fulfilled") {
-    meta.value = metaResult.value;
-    if (workspaceDraft.concurrency == null) {
-      concurrency.value = Math.min(metaResult.value.engine.defaultConcurrency || 3, concurrencyMax.value);
+async function refreshSettings() {
+  if (!currentUser.value) return;
+  if (settingsRefresh) return settingsRefresh;
+  const token = getAuthToken();
+  settingsRefresh = (async () => {
+    try {
+      const result = await api.meta();
+      if (getAuthToken() !== token || !currentUser.value) return;
+      meta.value = result;
+      if (result.user?.taskConcurrency != null) {
+        currentUser.value = { ...currentUser.value, taskConcurrency: result.user.taskConcurrency };
+      }
+      if (!initializedConcurrencyModes.has(selectedMode.value)) {
+        concurrency.value = result.engine.defaultConcurrency || 3;
+        initializedConcurrencyModes.add(selectedMode.value);
+      }
+      normalizeConcurrency();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401 && getAuthToken() === token) logoutUser();
     }
-    normalizeConcurrency();
+  })();
+  try {
+    await settingsRefresh;
+  } finally {
+    settingsRefresh = null;
   }
+}
+
+function refreshVisibleSettings() {
+  if (document.visibilityState === "visible") void refreshSettings();
+}
+
+function onRuntimeSettingsChanged(event: StorageEvent) {
+  if (event.key === RUNTIME_SETTINGS_CHANGED_KEY) void refreshSettings();
+}
+
+async function loadOverview() {
+  const [, statsResult, heatResult, announcementResult] = await Promise.allSettled([refreshSettings(), api.stats(), api.recentSuccess(), api.announcement()]);
   if (statsResult.status === "fulfilled") stats.value = statsResult.value;
   if (heatResult.status === "fulfilled") heatTimeline.value = heatResult.value;
   if (announcementResult.status === "fulfilled") announcement.value = announcementResult.value.announcement;
@@ -466,15 +540,54 @@ async function openPlusRecords() {
   finally { plusLoading.value = false; }
 }
 
-async function openEvents(task: Task) {
-  if (eventsLoading.value) return;
-  eventsOpen.value = task.id;
-  eventsLoading.value = true;
+function closeEvents() {
+  eventsRequestVersion++;
+  eventsOpen.value = null;
+  eventsLoading.value = false;
+  eventsError.value = "";
   taskEvents.value = [];
-  utilityError.value = "";
-  try { taskEvents.value = await api.taskEvents(task.id, cardCode.value.trim()); }
-  catch (error) { utilityError.value = error instanceof Error ? error.message : "事件读取失败"; }
-  finally { eventsLoading.value = false; }
+  if (eventsPollTimer) window.clearInterval(eventsPollTimer);
+  eventsPollTimer = null;
+}
+
+async function openEvents(task: Task, itemIndex: number | null = null) {
+  closeEvents();
+  eventsOpen.value = task.id;
+  eventItemIndex.value = itemIndex;
+  eventsPollTimer = window.setInterval(() => {
+    if (document.visibilityState === "visible") void refreshTaskEvents();
+  }, 2500);
+  await refreshTaskEvents();
+}
+
+async function refreshTaskEvents() {
+  const taskId = eventsOpen.value;
+  if (!taskId || eventsLoading.value) return;
+  const version = eventsRequestVersion;
+  const cdk = cardCode.value.trim();
+  eventsLoading.value = true;
+  eventsError.value = "";
+  try {
+    let cursor = taskEvents.value.at(-1)?.eventId || "";
+    while (true) {
+      const page = await api.taskEvents(taskId, cdk, cursor);
+      if (version !== eventsRequestVersion || eventsOpen.value !== taskId) return;
+      const seen = new Set(taskEvents.value.map((event) => event.eventId));
+      for (const event of page) {
+        if (event.eventId && !seen.has(event.eventId)) {
+          seen.add(event.eventId);
+          taskEvents.value.push(event);
+        }
+      }
+      const nextCursor = page.at(-1)?.eventId;
+      if (page.length < 200 || !nextCursor || nextCursor === cursor) break;
+      cursor = nextCursor;
+    }
+  } catch (error) {
+    if (version === eventsRequestVersion) eventsError.value = error instanceof Error ? error.message : "事件读取失败";
+  } finally {
+    if (version === eventsRequestVersion) eventsLoading.value = false;
+  }
 }
 
 function openQr(item: Task["items"][number]) {
@@ -695,7 +808,8 @@ function saveCurrentChannelDraft() {
 }
 
 function loadChannelDraft(id: string) {
-  const draft = channelDrafts.value[id] || defaultChannelDraft(id);
+  const draft = channelDrafts.value[id] || defaultChannelDraft(id, { concurrency: meta.value?.engine.defaultConcurrency || 3 });
+  if (meta.value) initializedConcurrencyModes.add(id);
   channelDrafts.value[id] = draft;
   importText.value = draft.importText;
   accounts.value = draft.accounts.slice();
@@ -720,13 +834,14 @@ function selectMode(id: string) {
   proxyChecking.value = false;
   blikCodes.value = {};
   expandedTaskItems.value = {};
-  eventsOpen.value = null;
+  closeEvents();
   mobileNavOpen.value = false;
 }
 
 function startPolling() {
-  if (pollTimer) return;
-  pollTimer = window.setInterval(() => void refreshTasks(), 2500);
+  if (!currentUser.value) return;
+  if (!pollTimer) pollTimer = window.setInterval(() => void refreshTasks(), 2500);
+  if (!settingsPollTimer) settingsPollTimer = window.setInterval(refreshVisibleSettings, 5000);
 }
 
 async function onAuthenticated(value: { token: string; user: User }) {
@@ -739,12 +854,18 @@ async function onAuthenticated(value: { token: string; user: User }) {
 }
 
 function logoutUser() {
+  closeEvents();
   if (pollTimer) {
     window.clearInterval(pollTimer);
     pollTimer = null;
   }
+  if (settingsPollTimer) {
+    window.clearInterval(settingsPollTimer);
+    settingsPollTimer = null;
+  }
   setAuthToken("");
   currentUser.value = null;
+  meta.value = null;
   cardState.value = null;
   tasks.value = [];
   observeTaskStatuses([]);
@@ -764,6 +885,7 @@ function persistWorkspaceDraft() {
 }
 
 watch(cardCode, (value) => {
+  closeEvents();
   cardState.value = null;
   if (value.trim()) sessionStorage.setItem("tilian:cdk", value.trim().toUpperCase());
   else sessionStorage.removeItem("tilian:cdk");
@@ -775,6 +897,9 @@ watch([concurrencyMax, selectedMode], normalizeConcurrency);
 
 onMounted(async () => {
   if (isAdminView || isApiDocsView) return;
+  window.addEventListener("focus", refreshVisibleSettings);
+  window.addEventListener("storage", onRuntimeSettingsChanged);
+  document.addEventListener("visibilitychange", refreshVisibleSettings);
   scheduleImportParsing(importText.value);
   const token = getAuthToken();
   if (token) {
@@ -790,7 +915,12 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  closeEvents();
   if (pollTimer) window.clearInterval(pollTimer);
+  if (settingsPollTimer) window.clearInterval(settingsPollTimer);
+  window.removeEventListener("focus", refreshVisibleSettings);
+  window.removeEventListener("storage", onRuntimeSettingsChanged);
+  document.removeEventListener("visibilitychange", refreshVisibleSettings);
   if (toastTimer) window.clearTimeout(toastTimer);
   if (draftTimer) window.clearTimeout(draftTimer);
   if (autoParseTimer) window.clearTimeout(autoParseTimer);
@@ -905,7 +1035,7 @@ onBeforeUnmount(() => {
         <article class="panel run-panel">
         <div class="panel-head"><div><span class="section-kicker">RUN CONTROL</span><h2>运行控制</h2><p>参数只对本次 {{ currentMode?.name }} 任务生效。</p></div><span class="mode-pill">{{ currentMode?.name }}</span></div>
         <div class="control-grid">
-          <label><span>并发 <b>{{ concurrency }}</b><small>上限 {{ concurrencyMax }}</small></span><input v-model.number="concurrency" type="range" min="1" :max="concurrencyMax" :aria-valuemax="concurrencyMax" /></label>
+          <label><span>并发 <b>{{ concurrency }}</b><small>上限 {{ concurrencyMax }}</small></span><input v-model.number="concurrency" type="range" min="1" :max="concurrencyMax" :aria-valuemax="concurrencyMax" @input="initializedConcurrencyModes.add(selectedMode)" /></label>
           <label><span>代理模式 <small v-if="proxyMode === 'builtin'" :class="{ 'pool-unavailable': !currentProxyPool?.enabled }">{{ currentProxyPool?.enabled ? `建单 ${currentProxyPool.primaryCount} / 出口 ${currentProxyPool.exitCount}` : '当前通道未配置' }}</small></span><select v-model="proxyMode"><option value="builtin">管理员代理池</option><option value="custom">自定义代理池</option></select></label>
           <label><span>国家 / 地区</span><select v-model="country"><option v-for="item in ['US','ID','PH','VN','IN','PL','BR','NL']" :key="item" :value="item">{{ item }}</option></select></label>
           <label><span>币种</span><select v-model="currency"><option v-for="item in ['USD','IDR','PHP','VND','INR','PLN','BRL','EUR']" :key="item" :value="item">{{ item }}</option></select></label>
@@ -966,22 +1096,26 @@ onBeforeUnmount(() => {
                 <div class="task-item-head">
                   <div class="task-item-account"><strong>{{ item.email || `账号 ${item.index + 1}` }}</strong><span class="state" :class="item.status"><i />{{ statusLabel(item.status) }}</span></div>
                   <div class="task-item-actions">
-                    <button class="button ghost task-details-toggle" type="button" :aria-expanded="itemDetailsOpen(task.id, item)" @click="toggleItemDetails(task.id, item.index)">{{ itemDetailsOpen(task.id, item) ? '收起详情' : '查看详情' }}</button>
+                    <button class="button ghost task-details-toggle" type="button" :aria-expanded="itemDetailsOpen(task.id, item)" :aria-controls="`task-detail-${task.id}-${item.index}`" @click="toggleItemDetails(task.id, item)">{{ itemDetailsOpen(task.id, item) ? '收起详情' : '查看详情' }}</button>
+                    <button class="button ghost task-details-toggle" type="button" @click="openEvents(task, item.index)">执行日志</button>
                     <button v-if="item.email" class="icon-button" type="button" title="复制账号" @click="copyLink(item.email)"><Copy :size="14" /></button>
                     <button v-if="item.link" class="button ghost link-copy-button" type="button" title="复制链接" @click="copyLink(item.link)"><Copy :size="14" />复制链接</button>
                     <button v-if="item.extra?.qrImage || item.extra?.qr_image || item.qrImage" class="icon-button" type="button" title="查看二维码" @click="openQr(item)"><QrCode :size="14" /></button>
                   </div>
                 </div>
-                <div class="task-item-stage"><span class="stage-chip">阶段：{{ stageLabel(item.stage) }}</span><span class="stage-detail">{{ item.stageDetail || '正在等待 Worker 处理' }}</span></div>
+                <div class="task-item-stage"><span class="stage-chip">阶段：{{ item.stage ? stageLabel(item.stage) : statusLabel(item.status) }}</span><span class="stage-detail">{{ itemStageDetail(item) }}</span></div>
                 <div v-if="itemStatusHint(item)" class="task-status-hint">{{ itemStatusHint(item) }}</div>
-                <div v-if="itemDetailsOpen(task.id, item)" class="task-error-detail" :class="{ 'task-error-detail-visible': isFailedTaskItem(item) }">
+                <div v-if="itemDetailsOpen(task.id, item)" :id="`task-detail-${task.id}-${item.index}`" class="task-error-detail" :class="{ 'task-error-detail-visible': isFailedTaskItem(item) }">
                   <div v-if="isFailedTaskItem(item)" class="task-error-title"><AlertCircle :size="15" />执行失败详情</div>
-                  <div class="task-error-line"><strong>失败阶段</strong><span>{{ stageLabel(item.stage) }}</span></div>
+                  <div class="task-error-line"><strong>{{ isFailedTaskItem(item) ? '失败阶段' : '当前阶段' }}</strong><span>{{ item.stage ? stageLabel(item.stage) : '未上报阶段' }}</span></div>
                   <div v-if="item.stageDetail" class="task-error-line"><strong>阶段说明</strong><span>{{ item.stageDetail }}</span></div>
                   <div v-if="item.error" class="task-error-line"><strong>失败原因</strong><span>{{ item.error }}</span></div>
                   <div v-else-if="isFailedTaskItem(item)" class="task-error-line"><strong>失败原因</strong><span>执行引擎未返回具体原因，请查看任务事件。</span></div>
                   <div v-if="item.errorCode" class="task-error-line"><strong>错误码</strong><code>{{ item.errorCode }}</code></div>
                   <div v-if="item.attempts" class="task-error-line"><strong>尝试次数</strong><span>{{ item.attempts }} 次</span></div>
+                  <div v-if="item.startedAt" class="task-error-line"><strong>开始时间</strong><span>{{ formatTaskTime(item.startedAt) }}</span></div>
+                  <div v-if="item.finishedAt" class="task-error-line"><strong>结束时间</strong><span>{{ formatTaskTime(item.finishedAt) }}</span></div>
+                  <div v-if="item.durationMs != null" class="task-error-line"><strong>执行耗时</strong><span>{{ (item.durationMs / 1000).toFixed(1) }} 秒</span></div>
                 </div>
                 <div v-if="item.status === 'waiting_blik' || canRefreshQr(item)" class="task-item-controls">
                   <button v-if="item.status === 'waiting_blik'" class="button ghost blik-refresh" type="button" @click="submitBlik(task, item.index)">提交 BLIK</button>
@@ -1019,7 +1153,29 @@ onBeforeUnmount(() => {
     <div v-if="plusOpen" class="modal-backdrop" @click.self="plusOpen = false"><section class="modal-panel utility-modal"><div class="panel-head"><div><span class="section-kicker">PLUS RECORDS</span><h2>Plus 到账记录</h2></div><button class="icon-button" type="button" title="关闭" @click="plusOpen = false"><X :size="18" /></button></div><div v-if="plusLoading" class="utility-loading"><LoaderCircle :size="20" class="spin" />正在读取到账记录</div><p v-else-if="utilityError" class="utility-error">{{ utilityError }}</p><div v-else class="record-list"><div v-for="record in plusRecords" :key="`${record.taskId}:${record.t}`"><strong>{{ record.email || '未知账号' }}</strong><small>{{ new Date(record.t).toLocaleString() }} · {{ record.taskId }}</small></div><div v-if="!plusRecords.length" class="empty-state"><ReceiptText :size="28" /><strong>暂无到账记录</strong></div></div></section></div>
     </transition>
     <transition name="modal" appear>
-    <div v-if="eventsOpen" class="modal-backdrop" @click.self="eventsOpen = null"><section class="modal-panel utility-modal"><div class="panel-head"><div><span class="section-kicker">TASK EVENTS</span><h2>任务事件</h2><p>这里会保留 Worker 上报的阶段和失败原因。</p></div><button class="icon-button" type="button" title="关闭" @click="eventsOpen = null"><X :size="18" /></button></div><div v-if="eventsLoading" class="utility-loading"><LoaderCircle :size="20" class="spin" />正在读取任务事件</div><p v-else-if="utilityError" class="utility-error">{{ utilityError }}</p><div v-else class="record-list task-event-list"><div v-for="event in taskEvents" :key="event.eventId"><strong>{{ eventTypeLabel(event.type) }}</strong><small>{{ new Date(event.createdAt).toLocaleString() }} · {{ event.itemIndex == null ? '任务级' : `账号 ${event.itemIndex + 1}` }}</small><span v-if="event.payload?.stage" class="event-stage">阶段：{{ stageLabel(String(event.payload.stage)) }}</span><span v-if="event.payload?.detail" class="event-detail">{{ String(event.payload.detail) }}</span><span v-if="event.payload?.error" class="event-error">失败原因：{{ String(event.payload.error) }}</span><code v-if="event.payload?.error_code">错误码：{{ String(event.payload.error_code) }}</code></div><div v-if="!taskEvents.length" class="empty-state"><Activity :size="28" /><strong>暂无事件</strong></div></div></section></div>
+    <div v-if="eventsOpen" class="modal-backdrop" @click.self="closeEvents">
+      <section class="modal-panel utility-modal task-events-modal" role="dialog" aria-modal="true" aria-labelledby="task-events-title">
+        <div class="panel-head"><div><span class="section-kicker">TASK EVENTS</span><h2 id="task-events-title">执行日志</h2><p>按时间显示已上报的阶段与结果，打开期间自动刷新。</p></div><button class="icon-button" type="button" title="关闭日志" @click="closeEvents"><X :size="18" /></button></div>
+        <div class="task-event-toolbar">
+          <label>账号 <select v-model="eventItemIndex"><option :value="null">全部账号</option><option v-for="item in eventTask?.items || []" :key="item.index" :value="item.index">账号 {{ item.index + 1 }}{{ item.email ? ` · ${item.email}` : '' }}</option></select></label>
+          <span>{{ visibleTaskEvents.length }} / {{ taskEvents.length }} 条</span>
+          <button class="button ghost" type="button" :disabled="eventsLoading" @click="refreshTaskEvents"><RefreshCw :size="14" :class="{ spin: eventsLoading }" />刷新日志</button>
+        </div>
+        <p v-if="eventsError" class="utility-error" role="alert">{{ eventsError }}，可点击“刷新日志”重试。</p>
+        <div v-if="eventsLoading && !taskEvents.length" class="utility-loading"><LoaderCircle :size="20" class="spin" />正在读取执行日志</div>
+        <div class="record-list task-event-list" aria-live="polite">
+          <div v-for="event in visibleTaskEvents" :key="event.eventId">
+            <strong>{{ eventTypeLabel(event.type) }}<span v-if="eventStatusLabel(event)" class="event-status">{{ eventStatusLabel(event) }}</span></strong>
+            <small>{{ formatTaskTime(event.createdAt) }} · {{ event.itemIndex == null ? '任务级' : `账号 ${event.itemIndex + 1}` }}<template v-if="event.payload?.attempt"> · 第 {{ event.payload.attempt }} 次尝试</template></small>
+            <span v-if="event.payload?.stage" class="event-stage">阶段：{{ stageLabel(String(event.payload.stage)) }}</span>
+            <span v-if="event.payload?.detail" class="event-detail">{{ String(event.payload.detail) }}</span>
+            <span v-if="event.payload?.error" class="event-error">失败原因：{{ String(event.payload.error) }}</span>
+            <code v-if="event.payload?.error_code || event.payload?.errorCode">错误码：{{ String(event.payload.error_code || event.payload.errorCode) }}</code>
+          </div>
+          <div v-if="!eventsLoading && !visibleTaskEvents.length && !eventsError" class="empty-state"><Activity :size="28" /><strong>暂无执行记录</strong><span>历史任务仅能显示当时已保存的日志。</span></div>
+        </div>
+      </section>
+    </div>
     </transition>
     <transition name="modal" appear>
     <div v-if="qrOpen" class="modal-backdrop" @click.self="qrOpen = false"><section class="modal-panel utility-modal qr-viewer"><div class="panel-head"><div><span class="section-kicker">PAYMENT QR</span><h2>{{ qrTitle }}</h2><p>二维码只在当前任务返回时展示。</p></div><button class="icon-button" type="button" title="关闭" @click="qrOpen = false"><X :size="18" /></button></div><img :src="qrSrc" :alt="qrTitle" /><button class="button secondary" type="button" @click="copyLink(qrSrc)"><Copy :size="15" />复制二维码数据</button></section></div>

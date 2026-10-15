@@ -124,13 +124,18 @@ export const api = {
   checkProxy: (proxy: string) => request<{ ok: boolean; proxy: string; ip?: string; latencyMs?: number; error?: string }>("/proxy/check", { method: "POST", body: JSON.stringify({ proxy }) }),
   plusRecords: (limit = 30) => request<{ records: Array<{ email: string; t: string; taskId: string }> }>(`/plus-records?limit=${limit}`),
   paymentConfig: () => request<{ enabled: boolean; plans: Array<{ id: string; label: string; quota: number; money: number }> }>("/payment/config"),
-  taskEvents: async (id: string, cardCode: string) => {
+  taskEvents: async (id: string, cardCode: string, afterEventId = "") => {
     const headers = new Headers({ "X-Tilian-CDK": cardCode });
     if (sessionToken) headers.set("Authorization", `Bearer ${sessionToken}`);
-    const response = await fetch(`${API_BASE}/tasks/${id}/events`, { headers });
+    const query = new URLSearchParams({ limit: "200" });
+    if (afterEventId) query.set("afterEventId", afterEventId);
+    const response = await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}/events?${query}`, { headers });
     if (!response.ok) throw new ApiError("事件读取失败", response.status);
     const text = await response.text();
-    return text.split(/\n/).filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6))) as Array<{ eventId: string; type: string; itemIndex?: number; payload?: Record<string, unknown>; createdAt: string }>;
+    return text.split(/\r?\n/)
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)))
+      .filter((event) => event && typeof event.eventId === "string" && typeof event.type === "string") as import("../types").TaskEvent[];
   },
   createPayment: (planId: string, type: string) => request<{ payUrl: string; order: { outTradeNo: string } }>("/payment/create", { method: "POST", body: JSON.stringify({ planId, type }) }),
   paymentOrder: (orderId: string) => request<{ order: Record<string, unknown> }>(`/payment/order?order_id=${encodeURIComponent(orderId)}`),

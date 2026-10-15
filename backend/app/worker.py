@@ -40,6 +40,7 @@ TERMINAL_RESULT_CODES = {
     "wallet_method_unavailable", "wallet_method_unavailable_env",
     "upi_payment_setup_declined", "upi_risk_blocked",
     "upi_billing_invalid", "upi_tls_configuration_error",
+    "upi_payment_canceled", "upi_checkout_expired",
 }
 
 
@@ -152,6 +153,14 @@ async def execute_item(task_id: str, item_index: int, semaphore: asyncio.Semapho
             item.started_at = item.started_at or datetime.now(timezone.utc)
             item.attempt += 1
             task.status = "running"
+            session.add(TaskEvent(
+                event_id=uuid.uuid4().hex, task_id=task_id, item_index=item_index,
+                event_type="task.item.started.v1",
+                payload={
+                    "attempt": item.attempt, "status": item.status,
+                    "stage": item.stage, "detail": item.stage_detail,
+                },
+            ))
             await session.commit()
             credential, account_session_token = decrypt_account_credential(item.credential)
             pool = [line.strip() for line in str(task.payload.get("proxiesText") or "").splitlines() if line.strip()]
@@ -255,7 +264,16 @@ async def execute_item(task_id: str, item_index: int, semaphore: asyncio.Semapho
                 result_extra = result.get("extra") if isinstance(result.get("extra"), dict) else {}
                 item.result = {**public_result, **result_extra, "qrPending": False, "qrRefreshActive": False}
             event_id = uuid.uuid4().hex
-            session.add(TaskEvent(event_id=event_id, task_id=task_id, item_index=item_index, event_type="task.item.completed.v1", payload={"ok": bool(result.get("ok")), "stage": item.stage, "detail": item.stage_detail, "error_code": item.error_code, "error": item.error}))
+            session.add(TaskEvent(
+                event_id=event_id, task_id=task_id, item_index=item_index,
+                event_type="task.item.completed.v1",
+                payload={
+                    "ok": bool(result.get("ok")), "stage": item.stage,
+                    "detail": item.stage_detail, "error_code": item.error_code,
+                    "error": item.error, "attempt": item.attempt,
+                    "status": item.status, "retry": item.status == "queued",
+                },
+            ))
             await session.commit()
             task_copy, item_copy = task, item
 

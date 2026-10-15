@@ -5,6 +5,14 @@ export type Channel = {
   color?: string;
 };
 
+export type TaskEvent = {
+  eventId: string;
+  type: string;
+  itemIndex?: number | null;
+  payload?: Record<string, unknown>;
+  createdAt: string;
+};
+
 export type TaskItem = {
   index: number;
   email?: string;

@@ -31,3 +31,13 @@ def test_upi_network_failure_can_still_retry():
         "reason_code": "upi_proxy_network_error",
         "retryable": True,
     }) is True
+
+
+@pytest.mark.parametrize("reason", [
+    "upi_payment_setup_declined", "upi_payment_canceled", "upi_checkout_expired",
+])
+def test_rejected_upi_delivery_never_automatically_retries(reason):
+    assert result_retryable({
+        "ok": False, "reason_code": reason, "retryable": True,
+        "extra": {"retryable": True},
+    }) is False

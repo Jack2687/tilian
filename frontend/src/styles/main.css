@@ -228,6 +228,12 @@ input[type="range"] { min-height: 20px; padding: 0; accent-color: var(--blue); b
 .task-event-list .event-detail { color: var(--faint); font-size: 10px; overflow-wrap: anywhere; }
 .task-event-list .event-error { color: #ff9ba6; font-size: 10px; overflow-wrap: anywhere; }
 .task-event-list code { color: #ffb5bd; font: 10px Consolas, monospace; overflow-wrap: anywhere; }
+.task-events-modal { width: min(780px, 100%); }
+.task-event-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; color: var(--muted); font-size: 11px; }
+.task-event-toolbar label { display: flex; flex: 1 1 220px; align-items: center; gap: 8px; min-width: 0; }
+.task-event-toolbar select { min-width: 0; max-width: 100%; flex: 1; }
+.event-status { margin-left: 8px; color: var(--muted); font-size: 10px; font-weight: 400; }
+.task-event-list .event-detail, .task-event-list .event-error { white-space: pre-wrap; }
 
 .toast { position: fixed; z-index: 80; right: 22px; bottom: 22px; max-width: min(420px, calc(100vw - 32px)); display: flex; align-items: center; gap: 9px; padding: 11px 14px; color: #dff8ef; font-size: 12px; background: #18342d; border: 1px solid #2d6554; border-radius: 6px; box-shadow: 0 14px 35px rgba(0,0,0,.35); }
 .toast.ok { top: 74px; bottom: auto; }

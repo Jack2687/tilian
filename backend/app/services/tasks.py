@@ -14,6 +14,7 @@ from ..models import OutboxEvent, QuotaCard, QuotaLedger, RuntimeConfig, Task, T
 from ..proxy import format_proxy_pool, normalize_proxy_pool
 from ..schemas import TaskCreate
 from ..security import encrypt_account_credential, mask_owner, mask_token, owner_key
+from .concurrency import effective_concurrency, load_concurrency_config
 
 
 MODE_NAMES = {
@@ -104,6 +105,9 @@ class TaskService:
         # requests, so wallet requests failed upstream instead of at admission.
         proxy_config = await self.session.get(RuntimeConfig, "proxy_pools") if data.proxyMode == "builtin" else None
         proxies_text, exit_proxies_text = task_proxy_pools(data, proxy_config.value if proxy_config else None)
+        concurrency_limit = effective_concurrency(await load_concurrency_config(self.session))
+        if data.concurrency > concurrency_limit:
+            raise ValueError(f"当前用户并发上限为 {concurrency_limit}")
         task_id = uuid.uuid4().hex[:16]
         cdk = data.cardCode.strip().upper()
         card, _ = await resolve_card(self.session, cdk, for_update=True)
@@ -117,8 +121,6 @@ class TaskService:
                 card.bound_at = utcnow()
             if len(accounts) > user.max_accounts_per_task:
                 raise ValueError(f"当前用户单任务最多提交 {user.max_accounts_per_task} 个账号")
-            if data.concurrency > user.task_concurrency:
-                raise ValueError(f"当前用户并发上限为 {user.task_concurrency}")
         available = card.quota - card.used_quota - card.reserved_quota
         if available < len(accounts):
             raise ValueError(f"卡密剩余额度不足，需要 {len(accounts)} 次，当前可用 {available} 次")

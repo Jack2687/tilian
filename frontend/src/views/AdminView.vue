@@ -6,6 +6,7 @@ import {
   Search, Filter, ChevronLeft, ChevronRight, UserRound, Settings2, Check, Pencil, Copy,
 } from "lucide-vue-next";
 import { api, ApiError } from "../api/client";
+import { notifyRuntimeSettingsChanged } from "../runtimeSettings";
 import type { AdminAnnouncement, AdminCard, AdminConcurrency, AdminLog, AdminOverview, AdminProxyPools, AdminRouteStat, AdminTask, AdminUser, ClusterStatus, UserPolicy } from "../types";
 
 const proxyModeNames: Record<string, string> = { paypal: "PayPal", gopay: "GoPay", gcash: "GCash", momo: "MoMo", upi: "UPI", blik: "BLIK", pix: "PIX", ideal: "iDEAL", card: "直卡" };
@@ -28,13 +29,14 @@ const usersLoading = ref(false);
 const selectedUser = ref<AdminUser | null>(null);
 const userEditorOpen = ref(false);
 const userSaving = ref(false);
-const userDraft = ref({ displayName: "", status: "active", taskConcurrency: 3, maxAccountsPerTask: 100, allowFusion: true, notes: "" });
+const userDraft = ref({ displayName: "", status: "active", maxAccountsPerTask: 100, allowFusion: true, notes: "" });
 const userPolicy = ref<UserPolicy>({ registrationEnabled: true, maxUsers: 10000, defaultConcurrency: 3, maxAccountsPerTask: 100, allowFusion: true });
 const policySaving = ref(false);
 const loading = ref(false);
 const error = ref("");
 const notice = ref("");
 const concurrency = ref<AdminConcurrency>({ default: 3, vip: 10, globalLimit: 100 });
+const sharedConcurrency = computed(() => Math.max(1, Math.min(concurrency.value.default, concurrency.value.globalLimit, 100)));
 const proxyPools = ref<AdminProxyPools>(emptyProxyPools());
 const selectedProxyMode = ref("paypal");
 const announcement = ref<AdminAnnouncement>({ title: "系统公告", content: "" });
@@ -49,7 +51,7 @@ const adminSections = [
 ];
 const sectionMeta: Record<string, { title: string; description: string }> = {
   dashboard: { title: "系统运行概览", description: "任务、卡密与基础设施状态集中管理。" },
-  concurrency: { title: "并发配置", description: "调整队列吞吐和全局并发上限，保存后对新任务生效。" },
+  concurrency: { title: "并发配置", description: "统一设置普通用户的任务并发上限，保存后用户工作台自动更新，新任务使用最新配置。" },
   proxies: { title: "代理池管理", description: "按通道维护建单代理和出口代理，用户任务只读取可用状态。" },
   announcement: { title: "公告管理", description: "发布、更新或撤下用户工作台顶部公告。" },
   cards: { title: "卡密与融合", description: "批量制卡、融合、复制和管理 CDK 库存。" },
@@ -57,7 +59,7 @@ const sectionMeta: Record<string, { title: string; description: string }> = {
   logs: { title: "提链日志", description: "查看任务执行和后台操作产生的审计日志。" },
   tasks: { title: "任务记录", description: "查看最近异步任务、任务项和最终状态。" },
   users: { title: "用户列表", description: "查看用户任务归属、在线状态和最后活跃时间。" },
-  "user-policy": { title: "用户策略", description: "动态控制注册开关、默认并发和新用户权限，保存后对新注册用户生效。" },
+  "user-policy": { title: "用户策略", description: "控制注册开关和新用户权限；所有普通用户的并发统一在并发配置中设置。" },
   danger: { title: "危险操作", description: "清理历史事件和统计数据，操作前请确认影响范围。" },
 };
 const activeSectionMeta = computed(() => sectionMeta[activeSection.value] || sectionMeta.dashboard);
@@ -193,7 +195,6 @@ function openUserEditor(user: AdminUser) {
   userDraft.value = {
     displayName: user.displayName,
     status: user.status,
-    taskConcurrency: user.taskConcurrency,
     maxAccountsPerTask: user.maxAccountsPerTask,
     allowFusion: user.allowFusion,
     notes: user.notes || "",
@@ -206,6 +207,7 @@ async function saveUser() {
   userSaving.value = true;
   try {
     await api.updateAdminUser(token.value, selectedUser.value.id, userDraft.value);
+    notifyRuntimeSettingsChanged();
     userEditorOpen.value = false;
     notice.value = `用户 ${selectedUser.value.username} 的配置已保存`;
     await loadUsers();
@@ -216,6 +218,7 @@ async function saveUserPolicy() {
   policySaving.value = true;
   try {
     userPolicy.value = await api.updateAdminUserPolicy(token.value, userPolicy.value);
+    notifyRuntimeSettingsChanged();
     notice.value = "用户策略已保存，新注册用户会使用最新默认值";
   } catch (value) { showError(value); } finally { policySaving.value = false; }
 }
@@ -236,7 +239,12 @@ async function fuseAdminCards() {
 }
 
 async function saveConcurrency() {
-  try { concurrency.value = await api.updateAdminConcurrency(token.value, concurrency.value); notice.value = "并发配置已保存"; } catch (value) { showError(value); }
+  try {
+    concurrency.value = await api.updateAdminConcurrency(token.value, concurrency.value);
+    notifyRuntimeSettingsChanged();
+    notice.value = "并发配置已保存，用户工作台会自动更新上限，新任务使用最新配置";
+    error.value = "";
+  } catch (value) { showError(value); }
 }
 
 async function saveProxyPools() {
@@ -379,11 +387,11 @@ onMounted(() => {
 
       <section v-if="activeSection === 'concurrency'" id="admin-concurrency" class="admin-grid admin-grid-single">
         <article class="admin-panel">
-          <div class="admin-panel-head"><div><span>CONCURRENCY</span><h2>并发与队列配置</h2></div><Route :size="19" /></div>
+          <div class="admin-panel-head"><div><span>CONCURRENCY</span><h2>任务并发配置</h2><p>所有普通用户共用此上限；每个任务仍可选择更小的并发。</p></div><Route :size="19" /></div>
           <div class="settings-grid">
-            <label>普通 CDK 并发<input v-model.number="concurrency.default" type="number" min="1" max="100" /></label>
-            <label>VIP / 高额度并发<input v-model.number="concurrency.vip" type="number" min="1" max="200" /></label>
-            <label>全局并发上限<input v-model.number="concurrency.globalLimit" type="number" min="1" max="1000" /></label>
+            <label>普通用户并发上限<input v-model.number="concurrency.default" type="number" min="1" max="100" /></label>
+            <label>VIP 并发（预留）<input v-model.number="concurrency.vip" type="number" disabled /><small>用户分级尚未启用</small></label>
+            <label>单任务硬上限<input v-model.number="concurrency.globalLimit" type="number" min="1" max="1000" /><small>每个任务最多同时执行的账号数</small></label>
           </div>
           <button class="button primary" type="button" @click="saveConcurrency"><Save :size="16" />保存并发配置</button>
         </article>
@@ -482,7 +490,7 @@ onMounted(() => {
           <div class="admin-panel-head"><div><span>USER POLICY</span><h2>注册与默认权限</h2><p>这些配置用于新用户注册；已存在用户请在用户列表中单独编辑。</p></div><Settings2 :size="19" /></div>
           <label class="switch-control"><input v-model="userPolicy.registrationEnabled" type="checkbox" /><span class="switch-ui" aria-hidden="true" /><span class="switch-copy"><b>开放用户注册</b><small>关闭后，已有用户仍可登录和使用工作台。</small></span><Check v-if="userPolicy.registrationEnabled" :size="17" /></label>
           <label class="switch-control"><input v-model="userPolicy.allowFusion" type="checkbox" /><span class="switch-ui" aria-hidden="true" /><span class="switch-copy"><b>新用户默认允许 CDK 融合</b><small>用户仍只能融合未绑定或自己绑定的 CDK。</small></span><Check v-if="userPolicy.allowFusion" :size="17" /></label>
-          <div class="settings-grid policy-settings"><label>最大注册用户数<input v-model.number="userPolicy.maxUsers" type="number" min="1" max="10000000" /><small>达到上限后停止新注册</small></label><label>新用户默认并发<input v-model.number="userPolicy.defaultConcurrency" type="number" min="1" max="100" /><small>每个用户任务的并发上限</small></label><label>单任务最大账号数<input v-model.number="userPolicy.maxAccountsPerTask" type="number" min="1" max="1000" /><small>限制一次提交的账号数量</small></label></div>
+          <div class="settings-grid policy-settings"><label>最大注册用户数<input v-model.number="userPolicy.maxUsers" type="number" min="1" max="10000000" /><small>达到上限后停止新注册</small></label><label>统一并发上限<input :value="sharedConcurrency" type="number" readonly /><small>在“并发配置”中修改，对所有普通用户生效</small></label><label>单任务最大账号数<input v-model.number="userPolicy.maxAccountsPerTask" type="number" min="1" max="1000" /><small>限制一次提交的账号数量</small></label></div>
           <button class="button primary" type="button" :disabled="policySaving" @click="saveUserPolicy"><LoaderCircle v-if="policySaving" :size="16" class="spin" /><Save v-else :size="16" />{{ policySaving ? '正在保存' : '保存用户策略' }}</button>
         </article>
       </section>
@@ -495,7 +503,7 @@ onMounted(() => {
           <div class="user-edit-grid">
             <label>显示名称<input v-model="userDraft.displayName" maxlength="120" /></label>
             <label>账号状态<select v-model="userDraft.status"><option value="active">正常</option><option value="disabled">停用并撤销登录</option></select></label>
-            <label>任务并发上限<input v-model.number="userDraft.taskConcurrency" type="number" min="1" max="100" /></label>
+            <label>统一并发上限<input :value="sharedConcurrency" type="number" readonly /><small>跟随“并发配置”，无需单独设置</small></label>
             <label>单任务账号上限<input v-model.number="userDraft.maxAccountsPerTask" type="number" min="1" max="1000" /></label>
           </div>
           <label class="switch-control"><input v-model="userDraft.allowFusion" type="checkbox" /><span class="switch-ui" aria-hidden="true" /><span class="switch-copy"><b>允许 CDK 融合</b><small>仅影响该用户；CDK 归属规则仍然生效。</small></span><Check v-if="userDraft.allowFusion" :size="17" /></label>
