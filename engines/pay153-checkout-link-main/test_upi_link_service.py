@@ -1332,14 +1332,14 @@ class UpiHar20260917AlignmentTests(unittest.TestCase):
         self.assertGreater(len({(r["address"]["line1"], r["address"]["postal_code"]) for r in rows}), 1)
 
     def test_billing_city_sync_is_opt_in(self):
-        # 默认（未设 UPI_BILLING_SYNC_CITY）不限制城市 → 全印度随机
+        # 默认（未设 UPI_BILLING_SYNC_CITY）不限制城市 → 池内五地区随机
         with patch.dict(os.environ, {"UPI_BILLING_SYNC_CITY": ""}):
             self.assertFalse(upi._upi_billing_sync_city())
         # 显式要求同城时才收敛到该城市
-        billing = upi._random_upi_billing_address(preferred_city="Kochi")
-        self.assertEqual(billing["address"]["city"], "Kochi")
-        self.assertEqual(billing["address"]["state"], "KL")
-        self.assertTrue(billing["address"]["postal_code"].startswith("682"))
+        billing = upi._random_upi_billing_address(preferred_city="Kolkata")
+        self.assertEqual(billing["address"]["city"], "Kolkata")
+        self.assertEqual(billing["address"]["state"], "WB")
+        self.assertTrue(billing["address"]["postal_code"].startswith("700"))
 
     def test_complete_indian_caller_address_is_kept(self):
         caller = fixture_billing()
@@ -1408,13 +1408,12 @@ class UpiHar20260917AlignmentTests(unittest.TestCase):
         # 全随机：多次提链不应始终落在同一套地址
         self.assertGreater(len({(b["line1"], b["postal_code"]) for b in captured}), 1)
 
-    def test_resolver_address_is_already_in_the_unique_billing_pool(self):
-        resolver_row = upi._resolver_indian_address_row()
-        if resolver_row is None:
-            self.skipTest("billing_address_resolver 不可用")
-        self.assertRegex(resolver_row[2], r"^[A-Z]{2}$")
-        self.assertRegex(resolver_row[3], r"^\d{6}$")
-        self.assertEqual(upi._upi_billing_address_rows().count(resolver_row), 1)
+    def test_billing_pool_is_limited_to_the_five_configured_states(self):
+        rows = upi._upi_billing_address_rows()
+        self.assertEqual({row[2] for row in rows}, set(upi.UPI_BILLING_STATES))
+        self.assertEqual(len(rows), len(set(rows)))
+        # 池外的邦/联邦属地不参与抽样（Kochi/KL 曾在池中）
+        self.assertFalse({"kochi", "hyderabad", "ahmedabad", "jaipur"} & upi._known_indian_cities())
 
 
 class UpiGit5ProtocolRailTests(unittest.TestCase):

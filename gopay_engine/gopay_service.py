@@ -392,18 +392,24 @@ def _run(
     if sticky_proxy:
         _emit("config", "run", "粘性代理已启用：建单/出口 IP 全程固定（不轮换）")
     fp = fingerprint or {}
-    # 建单前一次性探测代理出口城市，写回 fp.proxy_city：账单地址与代理出口
-    # 同城匹配（id_billing._pick_by_city），且同一账号/代理重试时不再重复探测。
-    # 探测失败静默降级为空（账单库全随机），不阻断提链。
+    # 建单前一次性探测代理出口：城市用于同城匹配（id_billing._pick_by_city），
+    # 经纬度供账单坐标反查使用。两者都写回 fp，同一账号/代理重试时不再重复探测。
+    # 探测失败静默降级（账单库全随机），不阻断提链。
     if fp and not fp.get("proxy_city") and checkout_proxy:
         try:
-            from id_billing import probe_exit_city as _probe_city
-            _city = _probe_city(checkout_proxy, timeout=min(max(float(timeout or 90), 5.0), 8.0))
-            if _city:
-                fp = {**fp, "proxy_city": str(_city)}
-                _emit("config", "run", "代理出口城市探测=" + str(_city) + "（账单同城匹配）")
+            from id_billing import probe_exit_geo as _probe_geo
+            _geo = _probe_geo(checkout_proxy, timeout=min(max(float(timeout or 90), 5.0), 8.0))
         except Exception:
-            pass
+            _geo = {}
+        if _geo:
+            fp = {**fp,
+                  "proxy_city": str(_geo.get("city") or ""),
+                  "proxy_country": str(_geo.get("country") or ""),
+                  "proxy_latitude": str(_geo.get("latitude") or ""),
+                  "proxy_longitude": str(_geo.get("longitude") or "")}
+            _emit("config", "run",
+                  "代理出口探测=" + str(_geo.get("city") or "?") + "/" + str(_geo.get("country") or "?")
+                  + "（账单同城匹配 + 坐标反查）")
     if fp:
         _emit("fingerprint", "run",
               "账号指纹 " + _fingerprint_summary(fp) + " 内核=" + str(fp.get("kernel") or "?")

@@ -400,6 +400,9 @@ INDIA_STATE_NAMES = {
     'UP': 'Uttar Pradesh',
     'WB': 'West Bengal',
 }
+# 本次提链只使用用户指定的五个地区。随机取址与显式地址校验都以此为准，
+# 其余邦/联邦属地的记录既不参与抽样也不通过校验。
+UPI_BILLING_STATES = ('DL', 'KA', 'MH', 'TN', 'WB')
 DEFAULT_LOCAL_PROXY = ""
 DEFAULT_UPI_BILLING = {
     'name': 'Raj Kumar',
@@ -422,91 +425,48 @@ UPI_BILLING_NAMES = (
     'Tanvi Shah', 'Ravi Kumar', 'Lakshmi Narayanan', 'Arnav Kohli', 'Anushka Bansal',
     'Kabir Sethi', 'Zoya Khan', 'Manav Trivedi', 'Simran Kaur', 'Yash Khurana',
 )
-# 内置印度地址候选：78 条，覆盖 49 个城市、24 个邦/联邦属地。
+# 内置印度地址候选：32 条，覆盖 15 个城市，全部落在 UPI_BILLING_STATES 的
+# 五个地区内（DL/KA/MH/TN/WB）；池外的邦/联邦属地记录已移除，不参与抽样。
 # 这些静态记录提供本地格式/区域校验依据，不代表邮政地址认证。
 UPI_BILLING_ADDRESS_POOL = (
-    ('Apollo Bunder, Colaba', 'Mumbai', 'MH', '400001'),
     ('Nariman Point', 'Mumbai', 'MH', '400021'),
-    ('Diplomatic Enclave, Chanakyapuri', 'New Delhi', 'DL', '110023'),
-    ('Sardar Patel Marg, Diplomatic Enclave', 'New Delhi', 'DL', '110021'),
     ('Janpath', 'New Delhi', 'DL', '110001'),
     ('Barakhamba Avenue', 'New Delhi', 'DL', '110001'),
+    ('Sardar Patel Marg, Diplomatic Enclave', 'New Delhi', 'DL', '110021'),
+    ('Diplomatic Enclave, Chanakyapuri', 'New Delhi', 'DL', '110023'),
     ('1 Residency Road', 'Bengaluru', 'KA', '560025'),
     ('37-39 MG Road', 'Bengaluru', 'KA', '560001'),
     ('23 Old Airport Road', 'Bengaluru', 'KA', '560008'),
     ('26/1 Dr Rajkumar Road', 'Bengaluru', 'KA', '560055'),
-    ('37 Mahatma Gandhi Road, Nungambakkam', 'Chennai', 'TN', '600034'),
-    ('365 Anna Salai, Teynampet', 'Chennai', 'TN', '600018'),
-    ('154 Velachery Main Road', 'Chennai', 'TN', '600042'),
-    ('17 Park Street', 'Kolkata', 'WB', '700016'),
-    ('34B Belvedere Road, Alipore', 'Kolkata', 'WB', '700027'),
-    ('Engine Bowli, Falaknuma', 'Hyderabad', 'TS', '500053'),
-    ('Road No. 1, Banjara Hills', 'Hyderabad', 'TS', '500034'),
-    ('1-10-147, Begumpet', 'Hyderabad', 'TS', '500016'),
-    ('Bhawani Singh Road', 'Jaipur', 'RJ', '302005'),
-    ('2, Riico Kukas', 'Jaipur', 'RJ', '302028'),
-    ('Senapati Bapat Road', 'Pune', 'MH', '411053'),
-    ('7/7 Mangaldas Road', 'Pune', 'MH', '411001'),
-    ('Ramdevnagar Road', 'Ahmedabad', 'GJ', '380054'),
-    ('SG Highway', 'Ahmedabad', 'GJ', '380054'),
-    ('178, Industrial Area Phase 1', 'Chandigarh', 'CH', '160002'),
-    ('8 Mahatma Gandhi Marg, Hazratganj', 'Lucknow', 'UP', '226001'),
-    ('DB City Mall, Arera Hills', 'Bhopal', 'MP', '462011'),
-    ('South Gandhi Maidan', 'Patna', 'BR', '800001'),
-    ('1, Airport Road, Hinoo', 'Ranchi', 'JH', '834002'),
-    ('Toshali Plaza, Sahid Nagar', 'Bhubaneswar', 'OD', '751007'),
-    ('National Highway 37, Gotanagar', 'Guwahati', 'AS', '781033'),
-    ('Marine Drive', 'Kochi', 'KL', '682031'),
-    ('Beach Road', 'Visakhapatnam', 'AP', '530023'),
-    ('C V Raman Pillai Road, Kowdiar', 'Thiruvananthapuram', 'KL', '695003'),
-    ('66, Avanashi Road', 'Coimbatore', 'TN', '641037'),
-    ('12, Linking Road, Bandra West', 'Mumbai', 'MH', '400050'),
-    ('18, Palm Beach Road, Vashi', 'Navi Mumbai', 'MH', '400703'),
-    ('Pokhran Road No. 2, Majiwada', 'Thane', 'MH', '400601'),
-    ('Lane 5, Koregaon Park', 'Pune', 'MH', '411001'),
-    ('College Road, Canada Corner', 'Nashik', 'MH', '422005'),
-    ('Civil Lines, Wardha Road', 'Nagpur', 'MH', '440001'),
-    ('C G Road, Navrangpura', 'Ahmedabad', 'GJ', '380009'),
-    ('Race Course Road, Alkapuri', 'Vadodara', 'GJ', '390007'),
-    ('Ghod Dod Road, Athwa', 'Surat', 'GJ', '395007'),
-    ('Sector 29, Near Leisure Valley', 'Gurugram', 'HR', '122001'),
-    ('Sector 17, Madhya Marg', 'Chandigarh', 'CH', '160017'),
-    ('Ranjit Avenue, Block B', 'Amritsar', 'PB', '143001'),
-    ('Ferozepur Road, Model Town', 'Ludhiana', 'PB', '141001'),
-    ('Rajpur Road, Hathibarkala', 'Dehradun', 'UK', '248001'),
-    ('The Mall Road, Chotta Shimla', 'Shimla', 'HP', '171002'),
-    ('Gandhi Nagar, Green Belt Road', 'Jammu', 'JK', '180004'),
-    ('Residency Road, Lal Chowk', 'Srinagar', 'JK', '190001'),
-    ('Sector 18, Atta Market Road', 'Noida', 'UP', '201301'),
-    ('Gomti Nagar, Vibhuti Khand', 'Lucknow', 'UP', '226010'),
-    ('Mall Road, Civil Lines', 'Kanpur', 'UP', '208001'),
-    ('M G Marg, Civil Lines', 'Prayagraj', 'UP', '211001'),
-    ('Vijay Nagar, A B Road', 'Indore', 'MP', '452010'),
-    ('Napier Town, South Civil Lines', 'Jabalpur', 'MP', '482001'),
-    ('G E Road, Telibandha', 'Raipur', 'CG', '492001'),
-    ('Circular Road, Lalpur', 'Ranchi', 'JH', '834001'),
-    ('Main Road, Bistupur', 'Jamshedpur', 'JH', '831001'),
-    ('Jayadev Vihar, Nandankanan Road', 'Bhubaneswar', 'OD', '751013'),
-    ('Buxi Bazar Road', 'Cuttack', 'OD', '753001'),
-    ('G S Road, Christian Basti', 'Guwahati', 'AS', '781005'),
-    ('Sevoke Road, Ward 10', 'Siliguri', 'WB', '734001'),
-    ('Sector V, Salt Lake', 'Kolkata', 'WB', '700091'),
     ('Indiranagar 100 Feet Road', 'Bengaluru', 'KA', '560038'),
     ('Sayyaji Rao Road, Devaraja Mohalla', 'Mysuru', 'KA', '570001'),
     ('K S Rao Road, Hampankatta', 'Mangaluru', 'KA', '575001'),
+    ('37 Mahatma Gandhi Road, Nungambakkam', 'Chennai', 'TN', '600034'),
+    ('365 Anna Salai, Teynampet', 'Chennai', 'TN', '600018'),
+    ('154 Velachery Main Road', 'Chennai', 'TN', '600042'),
     ('Sardar Patel Road, Adyar', 'Chennai', 'TN', '600020'),
+    ('66, Avanashi Road', 'Coimbatore', 'TN', '641037'),
     ('Race Course Road, Gopalapuram', 'Coimbatore', 'TN', '641018'),
     ('Alagar Kovil Road, Tallakulam', 'Madurai', 'TN', '625002'),
-    ('Hitech City Main Road, Madhapur', 'Hyderabad', 'TS', '500081'),
-    ('M G Road, Labbipet', 'Vijayawada', 'AP', '520010'),
-    ('Air Bypass Road, New Balaji Colony', 'Tirupati', 'AP', '517501'),
-    ('M G Road, Ernakulam', 'Kochi', 'KL', '682016'),
-    ('Mavoor Road, Arayidathupalam', 'Kozhikode', 'KL', '673004'),
-    ('M G Road, Panaji Market', 'Panaji', 'GA', '403001'),
+    ('17 Park Street', 'Kolkata', 'WB', '700016'),
+    ('34B Belvedere Road, Alipore', 'Kolkata', 'WB', '700027'),
+    ('Sector V, Salt Lake', 'Kolkata', 'WB', '700091'),
+    ('Sevoke Road, Ward 10', 'Siliguri', 'WB', '734001'),
+    ('Apollo Bunder, Colaba', 'Mumbai', 'MH', '400001'),
+    ('12, Linking Road, Bandra West', 'Mumbai', 'MH', '400050'),
+    ('Senapati Bapat Road', 'Pune', 'MH', '411053'),
+    ('7/7 Mangaldas Road', 'Pune', 'MH', '411001'),
+    ('Lane 5, Koregaon Park', 'Pune', 'MH', '411001'),
+    ('18, Palm Beach Road, Vashi', 'Navi Mumbai', 'MH', '400703'),
+    ('Pokhran Road No. 2, Majiwada', 'Thane', 'MH', '400601'),
+    ('College Road, Canada Corner', 'Nashik', 'MH', '422005'),
+    ('Civil Lines, Wardha Road', 'Nagpur', 'MH', '440001'),
 )
 
-# 城市查询仅供显式启用同城选择且未填写地址时使用，按代理缓存。
+# 代理出口探测结果按代理缓存（城市 + 经纬度）。同城选择与账单反查共用一次探测，
+# 避免同一代理在一次任务里被查询两次。
 _EXIT_CITY_BY_PROXY: dict[str, str] = {}
+_EXIT_GEO_BY_PROXY: dict[str, dict[str, str]] = {}
 _UPI_BILLING_PICK_LOCK = threading.Lock()
 _UPI_LAST_BILLING_ROW: tuple[str, str, str, str] | None = None
 
@@ -532,9 +492,113 @@ def _upi_state_code(value: str) -> str:
     return ''
 
 
+# 池外地址来源：默认不读取，生产行为与硬编码池完全一致。配置路径后按行追加，
+# 供运营在不改代码、不重新部署的情况下接入整理好的地址（如 locations.json
+# references 里那条真实用户地址）。文件缺失或格式错误时回退到内置池，不抛错。
+UPI_BILLING_POOL_FILE_ENV = 'UPI_BILLING_POOL_FILE'
+# 只接受这五个地区，与 UPI_BILLING_STATES 同源。
+_UPI_BILLING_EXTERNAL_FIELDS = ('line1', 'city', 'state', 'postal_code')
+_EXTERNAL_ROW_CACHE: dict[str, list[tuple[str, str, str, str]]] = {}
+_EXTERNAL_ROW_CACHE_LOCK = threading.Lock()
+
+
+def _external_billing_pool_file() -> str:
+    return str(os.environ.get(UPI_BILLING_POOL_FILE_ENV) or '').strip()
+
+
+def _read_billing_row_source(path: str) -> list[Any]:
+    """Read a JSON array, an {"addresses": [...]} object, or JSONL.
+
+    A single-line JSONL record parses as a lone object rather than a document,
+    so the whole text is tried first and only a parse failure falls back to
+    reading it line by line.
+    """
+    text = Path(path).read_text(encoding='utf-8-sig')
+    stripped = text.strip()
+    if not stripped:
+        return []
+    if stripped[0] in '[{':
+        try:
+            loaded = json.loads(stripped)
+        except ValueError:
+            loaded = None
+        if isinstance(loaded, list):
+            return list(loaded)
+        if isinstance(loaded, dict):
+            wrapped = loaded.get('addresses')
+            if isinstance(wrapped, list):
+                return list(wrapped)
+            # A lone record object written as one JSON document.
+            return [loaded]
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    return rows
+
+
+def _external_billing_address_rows() -> list[tuple[str, str, str, str]]:
+    """Load operator-supplied rows from UPI_BILLING_POOL_FILE.
+
+    Never raises and never touches the network: a missing, unreadable, or
+    malformed file yields no rows so the built-in pool stays authoritative.
+    Malformed individual records are skipped rather than failing the batch.
+    """
+    path = _external_billing_pool_file()
+    if not path:
+        return []
+    with _EXTERNAL_ROW_CACHE_LOCK:
+        cached = _EXTERNAL_ROW_CACHE.get(path)
+        if cached is None:
+            cached = _load_external_billing_rows(path)
+            _EXTERNAL_ROW_CACHE[path] = cached
+        return list(cached)
+
+
+def _load_external_billing_rows(path: str) -> list[tuple[str, str, str, str]]:
+    try:
+        source = _read_billing_row_source(path)
+    except Exception:
+        return []
+    rows = []
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        # 同时接受 {address:{...}} 与扁平 {line1,city,...} 两种写法。
+        address = item.get('address') if isinstance(item.get('address'), dict) else item
+        state = _upi_state_code(address.get('state_code') or address.get('state'))
+        if state not in UPI_BILLING_STATES:
+            continue
+        values = []
+        for key in _UPI_BILLING_EXTERNAL_FIELDS:
+            if key == 'state':
+                values.append(state)
+                continue
+            raw = address.get(key)
+            if key == 'postal_code' and isinstance(raw, int) and not isinstance(raw, bool):
+                raw = str(raw)
+            if not isinstance(raw, str) or not raw.strip():
+                values.append('')
+                continue
+            values.append(' '.join(raw.split()))
+        rows.append(tuple(values))
+    return rows
+
+
+def _reset_upi_billing_row_caches() -> None:
+    """Drop the cached pool file so a new UPI_BILLING_POOL_FILE takes effect."""
+    with _EXTERNAL_ROW_CACHE_LOCK:
+        _EXTERNAL_ROW_CACHE.clear()
+
+
 def _upi_billing_address_rows() -> list[tuple[str, str, str, str]]:
-    """Merge static candidates once per selection, preserving equal row weights."""
-    candidates = list(UPI_BILLING_ADDRESS_POOL)
+    """Merge static candidates on each call, preserving equal row weights.
+
+    Only the external file read is cached; the merge and filter stay uncached so
+    callers can still patch UPI_BILLING_ADDRESS_POOL or the resolver in tests.
+    """
+    candidates = list(UPI_BILLING_ADDRESS_POOL) + _external_billing_address_rows()
     try:
         from billing_address_resolver import _BUILTIN_PUBLIC_ADDRESSES
     except ImportError:
@@ -552,6 +616,8 @@ def _upi_billing_address_rows() -> list[tuple[str, str, str, str]]:
         line1, city, state, postal = (str(value or '').strip() for value in row)
         line1 = ' '.join(line1.split())
         city, state = _upi_city_name(city), _upi_state_code(state)
+        if state not in UPI_BILLING_STATES:
+            continue
         if not line1 or not city or not state or not re.fullmatch(r'[1-9][0-9]{5}', postal):
             continue
         signature = (line1.casefold(), city.casefold(), state, postal)
@@ -562,28 +628,111 @@ def _upi_billing_address_rows() -> list[tuple[str, str, str, str]]:
 
 
 def _probe_upi_exit_city(proxy: str) -> str:
+    """返回代理出口城市名；同时缓存坐标供账单反查使用。"""
+    return str(_probe_upi_exit_geo(proxy).get('city') or '')
+
+
+_PROXY_GEO_PROBE_URL = (
+    'http://ip-api.com/json/'
+    '?fields=status,countryCode,regionName,city,zip,lat,lon'
+)
+_PROXY_GEO_PROBE_TIMEOUT = 8.0
+# 探测请求与提链主链路共用同一套 TLS 身份，这里固定用 UPI 默认档案。
+_PROXY_GEO_PROBE_IMPERSONATE = 'chrome136'
+
+
+def _probe_upi_exit_geo(proxy: str) -> dict[str, str]:
+    """探测代理出口的国家、城市与经纬度。
+
+    经纬度是账单地址反查的前置输入。失败时返回空字典，调用方回退到本地地址池，
+    不会因为探测失败而中断提链。
+    """
+    proxy = str(proxy or '').strip()
     if not proxy:
-        return ''
+        return {}
+    cached = _EXIT_GEO_BY_PROXY.get(proxy)
+    if cached is not None:
+        return dict(cached)
+    geo: dict[str, str] = {}
+    session = None
     try:
-        import importlib.util
-        import os as _os
-        _gopay_dir = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), '..', '..', 'gopay_engine'))
-        _spec = importlib.util.spec_from_file_location('_upi_id_billing_probe', _os.path.join(_gopay_dir, 'id_billing.py'))
-        if not _spec or not _spec.loader:
-            return ''
-        _mod = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-        _fn = getattr(_mod, 'probe_exit_city', None)
-        if not callable(_fn):
-            return ''
-        city = str(_fn(proxy=proxy, timeout=5.0) or '').strip()
-        return city.split(',')[0].strip() if city else ''
+        session = _new_upi_http_session(_PROXY_GEO_PROBE_IMPERSONATE)
+        response = session.get(
+            _PROXY_GEO_PROBE_URL,
+            proxies={'http': proxy, 'https': proxy},
+            timeout=_PROXY_GEO_PROBE_TIMEOUT,
+        )
+        if response.status_code == 200:
+            payload = response.json() or {}
+            if str(payload.get('status') or '').lower() == 'success':
+                geo = {
+                    'country': str(payload.get('countryCode') or '').upper().strip(),
+                    'region': str(payload.get('regionName') or '').strip(),
+                    'city': str(payload.get('city') or '').strip(),
+                    'postal': str(payload.get('zip') or '').strip(),
+                    'latitude': str(payload.get('lat') or '').strip(),
+                    'longitude': str(payload.get('lon') or '').strip(),
+                }
     except Exception:
-        return ''
+        geo = {}
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+    _EXIT_GEO_BY_PROXY[proxy] = geo
+    return dict(geo)
+
+
+def _reverse_billing_from_proxy(proxy_url: str) -> dict[str, Any]:
+    """按代理出口坐标反查一条印度账单，供 build_upi_billing 复用。
+
+    只负责探测与反查，地址规范化交给 `_reverse_address_fields`。非印度出口、
+    五地区之外的结果或反查失败时返回空字典，调用方继续走本地地址池。
+    """
+    geo = _probe_upi_exit_geo(proxy_url)
+    if str(geo.get('country') or '') != 'IN':
+        return {}
+    try:
+        from billing_address_resolver import resolve_reverse_address
+    except ImportError:
+        return {}
+    try:
+        resolved = resolve_reverse_address(geo.get('latitude'), geo.get('longitude'), 'IN')
+    except Exception:
+        return {}
+    if not isinstance(resolved, dict):
+        return {}
+    line1 = ' '.join(str(resolved.get('line1') or '').split())
+    city = ' '.join(str(resolved.get('city') or '').split())
+    state = str(resolved.get('state') or '').strip()
+    postal = str(resolved.get('postal_code') or '').strip()
+    # 反查允许邮编缺失或街道缺失，但建单不允许；缺字段时退回地址池而不是提交
+    # 半条地址，也避免用空邮编去撞后端的格式校验。
+    if not line1 or not city or _upi_state_code(state) not in UPI_BILLING_STATES or not re.fullmatch(r'[1-9][0-9]{5}', postal):
+        return {}
+    # 刻意不返回反查的 name：Nominatim 的 name 是商户或地标名（amenity/shop/building），
+    # 不是人名，不能当账单姓名提交。姓名由 UPI_BILLING_NAMES 生成。
+    return {
+        'address': {
+            'line1': line1,
+            'city': city,
+            'state': state,
+            'postal_code': postal,
+            'country': 'IN',
+        },
+        # 仅供步骤详情展示来源；建单代码不读这个字段。
+        '_address_source': str(resolved.get('source') or 'openstreetmap_nominatim_reverse'),
+    }
 
 
 def _resolver_indian_address_row() -> tuple | None:
-    """Compatibility helper; UPI selection uses the deduplicated full pool."""
+    """兼容辅助：直接取解析器的一条印度记录。
+
+    解析器内含全部邦/联邦属地，本函数只做格式校验，不按 UPI_BILLING_STATES
+    过滤；其返回值也不保证落在 UPI 账单池内，请勿用它断言池的成员关系。
+    """
     try:
         from billing_address_resolver import resolve_public_address  # 同目录模块
         resolved = resolve_public_address('IN', '', '', '')
@@ -654,6 +803,11 @@ def _is_complete_indian_address(line1: str, city: str, state: str, postal: str, 
 def _upi_billing_sync_city() -> bool:
     """账单是否与代理出口同城（默认关闭：地址走全印度随机）。"""
     return str(os.environ.get('UPI_BILLING_SYNC_CITY') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _upi_billing_reverse_enabled() -> bool:
+    """是否按代理出口坐标反查账单（默认开启；设为 0/false 退回本地地址池）。"""
+    return str(os.environ.get(UPI_BILLING_REVERSE_ENV) or '1').strip().lower() not in {'0', 'false', 'no', 'off'}
 UPI_SCHEME_RE = re.compile('upi://pay[^\\s\\"\'<>]*', re.I)
 STRIPE_HOSTED_RE = re.compile('https://hooks\\.stripe\\.com/redirect/[^\\s\\"\'<>]+', re.I)
 STRIPE_UPI_INSTRUCTIONS_RE = re.compile('https://payments\\.stripe\\.com/upi/instructions/[^\\s\\"\'<>]+', re.I)
@@ -665,6 +819,9 @@ APPROVED_REDIRECT_POLL_ATTEMPTS = 20
 # UPI 二维码轮询上限：二维码有效期约 5 分钟且随轮询刷新，2s 间隔 × 120 ≈ 4 分钟，
 # 期间持续推送最新二维码，status=succeeded 即到账。
 UPI_PAYMENT_POLL_ATTEMPTS = 120
+
+# 默认按代理出口坐标反查账单地址；设为 0/false 可退回纯本地地址池。
+UPI_BILLING_REVERSE_ENV = 'UPI_BILLING_REVERSE'
 
 def _project_root() -> str:
     return str(os.environ.get('VERIFY_APP_ROOT') or os.environ.get('APP_ROOT') or '').strip() or os.path.dirname(__file__)
@@ -3009,19 +3166,29 @@ def _normalize_upi_billing(
     email: str,
     *,
     preferred_city: str = '',
+    reverse_address: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Keep valid caller addresses; use the pool only when no address was entered."""
+    """Keep valid caller addresses; otherwise use the reverse lookup, then the pool.
+
+    优先级：调用方填写的地址 > 通过五地区过滤的反查地址 > 本地地址池。
+    反查结果与本地池共用 UPI_BILLING_STATES，但不要求城市已经收录在本地池中。
+    姓名不参与这个优先级：反查只提供地址，姓名单独生成。
+    """
     source = billing if isinstance(billing, dict) else {}
     address = _upi_supplied_address(billing)
+    default_name = ''
+    if address is None and isinstance(reverse_address, dict):
+        address = _reverse_address_fields(reverse_address)
     if address is None:
         selected = _random_upi_billing_address(preferred_city=preferred_city)
         address = selected['address']
         default_name = selected['name']
-    else:
-        default_name = ''
-    name = str(source.get('name') or '').strip()
+    # 姓名与地址来源无关：反查只提供地址，姓名始终按调用方 > 随机印度姓名产生，
+    # 避免把地图上的商户/地标名当成持卡人姓名提交。
+    name = str(source.get('name') or '').strip() or default_name
     if not name:
-        name = default_name or random.SystemRandom().choice(UPI_BILLING_NAMES)
+        name = random.SystemRandom().choice(UPI_BILLING_NAMES)
+    # 返回结构保持不变：来源标记不进这个字典，避免它随 result 一起流到结果 extra。
     return {
         'name': name,
         'email': str(source.get('email') or '').strip() or str(email or '').strip() or f'checkout-{uuid.uuid4().hex[:10]}@outlook.com',
@@ -3034,14 +3201,53 @@ def _normalize_upi_billing(
     }
 
 
+def _upi_address_line(billing: dict[str, Any], source: str) -> str:
+    """账单来源与地址摘要，用于步骤详情；字段缺失时也要能读。"""
+    address = billing.get('address') if isinstance(billing.get('address'), dict) else billing
+    return (
+        f'本次账单地址：{address.get("city") or "?"}/{address.get("state") or "?"} '
+        f'{address.get("postal_code") or "?"}；source={source or "upi_billing_pool"}'
+    )
+
+
+def _reverse_address_fields(reverse_address: dict[str, Any]) -> dict[str, str] | None:
+    """把反查结果转成内部地址字段；缺字段或不在五地区内时返回 None。"""
+    address = reverse_address.get('address')
+    if not isinstance(address, dict):
+        return None
+    line1 = ' '.join(str(address.get('line1') or '').split())
+    city = _upi_city_name(str(address.get('city') or '').strip())
+    state_code = _upi_state_code(address.get('state'))
+    postal = str(address.get('postal_code') or '').strip()
+    if not line1 or not city or state_code not in UPI_BILLING_STATES:
+        return None
+    if not re.fullmatch(r'[1-9][0-9]{5}', postal):
+        # 反查允许邮编缺失；建单前用空串占位会失败，这里退回地址池更安全。
+        return None
+    return {
+        'line1': line1,
+        'line2': '',
+        'city': city,
+        'state': state_code,
+        'postal_code': postal,
+        'country': 'IN',
+    }
+
+
 def build_upi_billing(
     email: str = '',
     billing: dict[str, Any] | None = None,
     *,
     preferred_city: str = '',
+    reverse_address: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Normalize one attempt's billing data for reuse throughout Checkout."""
-    return _normalize_upi_billing(billing, email, preferred_city=preferred_city)
+    return _normalize_upi_billing(
+        billing,
+        email,
+        preferred_city=preferred_city,
+        reverse_address=reverse_address,
+    )
 
 
 def _ensure_upi_not_cancelled(cancelled: Any) -> None:
@@ -3090,6 +3296,18 @@ def extract_upi_link(access_token: str, proxy: str | None=None, *, proxy_pool: l
             except Exception:
                 _EXIT_CITY_BY_PROXY[proxy_url] = ''
         preferred_city = _EXIT_CITY_BY_PROXY.get(proxy_url, '')
+    # 代理坐标反查在鉴权之前完成并冻结：地址来源要与后续建单使用同一条出口。
+    # 反查失败返回空字典，建单时按原逻辑回退本地地址池。
+    _reverse_billing: dict[str, Any] = {}
+    _billing_source = 'caller' if supplied_address is not None else 'upi_billing_pool'
+    if supplied_address is None and _upi_billing_reverse_enabled():
+        _reverse_billing = _reverse_billing_from_proxy(proxy_url)
+        if _reverse_address_fields(_reverse_billing) is not None:
+            _billing_source = str(
+                _reverse_billing.get('_address_source') or 'openstreetmap_nominatim_reverse'
+            )
+        else:
+            _reverse_billing = {}
     promotion_proxy_url = _normalize_upi_proxy_url(
         str(promotion_proxy or proxy_url).strip()
     ) or proxy_url
@@ -3188,17 +3406,19 @@ def extract_upi_link(access_token: str, proxy: str | None=None, *, proxy_pool: l
             else:
                 step('优惠资格预检', 'info', '未提交优惠活动')
 
-            # Each attempt reuses caller billing or selects one pool address;
-            # taxes, snapshot and confirmation share this same result.
+            # Each attempt reuses caller billing, then the frozen reverse
+            # address, and only falls back to a pool row. Taxes, snapshot and
+            # confirmation share this same result.
             upi_billing = build_upi_billing(
                 email,
                 billing,
                 preferred_city=preferred_city,
+                reverse_address=_reverse_billing,
             )
             step(
                 '账单地址',
                 'info',
-                f'本次账单地址：{upi_billing["city"]}/{upi_billing["state"]} {upi_billing["postal_code"]}',
+                _upi_address_line(upi_billing, _billing_source),
             )
             result = _run_upi_attempt(client, token, step, steps, promotion_proxy=promotion_proxy_url, billing=upi_billing, setup_proxies=setup_proxy_pool, use_promo=use_promo, promo_campaign=campaign_id, on_qr_update=on_qr_update, cancelled=cancelled, checkout_ui_mode=checkout_ui_mode, force_payment_method=force_payment_method, force_zero=force_zero, wait_paid=wait_paid, paid_timeout=paid_timeout, upi_rail=upi_rail, upi_setup_v2=upi_setup_v2, require_server_upi_mandate=require_server_upi_mandate, requested_upi_mandate=requested_upi_mandate, upi_har_context=upi_har_context)
             watch_started = bool(result.pop('_watch_started', False))

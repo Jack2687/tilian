@@ -11,6 +11,7 @@ backups/
 *.out
 *.log
 *.jsonl
+!tests/fixtures/upi_sandbox/addresses.jsonl
 *.zip
 node_modules/
 tools/upi_go/pix_extract_slot

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "note": "Operator-maintained UPI billing addresses. Loaded only when UPI_BILLING_POOL_FILE points at this file; the built-in pool is used otherwise. Rows must stay inside UPI_BILLING_STATES (DL/KA/MH/TN/WB); the loader drops anything else.",
+  "addresses": [
+    {
+      "line1": "140 Pawasakar Galli Road, Somwar Peth",
+      "city": "Karad",
+      "state": "MH",
+      "postal_code": "415100"
+    },
+    {
+      "line1": "441 Kollam - Theni Road (Old NH220)",
+      "city": "Cumbum",
+      "state": "TN",
+      "postal_code": "625516"
+    },
+    {
+      "line1": "151 East Aadi Street, Sellur",
+      "city": "Madurai",
+      "state": "TN",
+      "postal_code": "625001"
+    },
+    {
+      "line1": "404 East Chithirai Street, Sellur",
+      "city": "Madurai",
+      "state": "TN",
+      "postal_code": "625001"
+    },
+    {
+      "line1": "104 Santa Cruz – Chembur Link Road, Netaji Nagar",
+      "city": "Mumbai",
+      "state": "MH",
+      "postal_code": "400070"
+    },
+    {
+      "line1": "385 Rambaug Lane Number 2, Khadakpada",
+      "city": "Kalyan-Dombivli",
+      "state": "MH",
+      "postal_code": "421306"
+    },
+    {
+      "line1": "64 Shivaji Road, Kasba Peth",
+      "city": "Pune",
+      "state": "MH",
+      "postal_code": "411001"
+    }
+  ]
+}

@@ -1,0 +1,673 @@
+{
+  "schema_version": 1,
+  "test_only": true,
+  "purpose": "Offline and sandbox fixtures only. Synthetic addresses are not valid customer billing data.",
+  "allowed_states": {
+    "DL": "Delhi",
+    "KA": "Karnataka",
+    "MH": "Maharashtra",
+    "TN": "Tamil Nadu",
+    "WB": "West Bengal"
+  },
+  "weight_policy": {
+    "baseline": 1,
+    "user_reported_city_pin": 3,
+    "user_reported_full_address": 5,
+    "meaning": "Relative test sampling weights chosen for scenario coverage; not measured payment success probabilities. Repeated reports do not multiply weights."
+  },
+  "locations": [
+    {
+      "location_id": "DL-new-delhi-110001",
+      "city": "New Delhi",
+      "state_code": "DL",
+      "state": "Delhi",
+      "postal_code": "110001",
+      "test_sampling_weight": 3,
+      "weight_basis": "user_reported_city_pin",
+      "reference_ids": [
+        "T05"
+      ],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "DL-new-delhi-110021",
+      "city": "New Delhi",
+      "state_code": "DL",
+      "state": "Delhi",
+      "postal_code": "110021",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "DL-new-delhi-110023",
+      "city": "New Delhi",
+      "state_code": "DL",
+      "state": "Delhi",
+      "postal_code": "110023",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "KA-bengaluru-560001",
+      "city": "Bengaluru",
+      "state_code": "KA",
+      "state": "Karnataka",
+      "postal_code": "560001",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "KA-bengaluru-560008",
+      "city": "Bengaluru",
+      "state_code": "KA",
+      "state": "Karnataka",
+      "postal_code": "560008",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "KA-bengaluru-560025",
+      "city": "Bengaluru",
+      "state_code": "KA",
+      "state": "Karnataka",
+      "postal_code": "560025",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "KA-bengaluru-560038",
+      "city": "Bengaluru",
+      "state_code": "KA",
+      "state": "Karnataka",
+      "postal_code": "560038",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "KA-bengaluru-560055",
+      "city": "Bengaluru",
+      "state_code": "KA",
+      "state": "Karnataka",
+      "postal_code": "560055",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "KA-mangaluru-575001",
+      "city": "Mangaluru",
+      "state_code": "KA",
+      "state": "Karnataka",
+      "postal_code": "575001",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "KA-mysuru-570001",
+      "city": "Mysuru",
+      "state_code": "KA",
+      "state": "Karnataka",
+      "postal_code": "570001",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-kalyan-dombivli-421306",
+      "city": "Kalyan-Dombivli",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "421306",
+      "test_sampling_weight": 5,
+      "weight_basis": "user_reported_full_address",
+      "reference_ids": [
+        "F06"
+      ],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-karad-415100",
+      "city": "Karad",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "415100",
+      "test_sampling_weight": 5,
+      "weight_basis": "user_reported_full_address",
+      "reference_ids": [
+        "F01"
+      ],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-mumbai-400001",
+      "city": "Mumbai",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "400001",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-mumbai-400017",
+      "city": "Mumbai",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "400017",
+      "test_sampling_weight": 3,
+      "weight_basis": "user_reported_city_pin",
+      "reference_ids": [
+        "T02"
+      ],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-mumbai-400021",
+      "city": "Mumbai",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "400021",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-mumbai-400050",
+      "city": "Mumbai",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "400050",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-mumbai-400070",
+      "city": "Mumbai",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "400070",
+      "test_sampling_weight": 5,
+      "weight_basis": "user_reported_full_address",
+      "reference_ids": [
+        "F04"
+      ],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-nagpur-440001",
+      "city": "Nagpur",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "440001",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-nashik-422005",
+      "city": "Nashik",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "422005",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-navi-mumbai-400703",
+      "city": "Navi Mumbai",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "400703",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-pune-411001",
+      "city": "Pune",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "411001",
+      "test_sampling_weight": 5,
+      "weight_basis": "user_reported_full_address",
+      "reference_ids": [
+        "F07"
+      ],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-pune-411053",
+      "city": "Pune",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "411053",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "MH-thane-400601",
+      "city": "Thane",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "400601",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "TN-chennai-600018",
+      "city": "Chennai",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "600018",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "TN-chennai-600020",
+      "city": "Chennai",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "600020",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "TN-chennai-600034",
+      "city": "Chennai",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "600034",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "TN-chennai-600042",
+      "city": "Chennai",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "600042",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "TN-coimbatore-641018",
+      "city": "Coimbatore",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "641018",
+      "test_sampling_weight": 3,
+      "weight_basis": "user_reported_city_pin",
+      "reference_ids": [
+        "T09",
+        "T10"
+      ],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "TN-coimbatore-641037",
+      "city": "Coimbatore",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "641037",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "TN-cumbum-625516",
+      "city": "Cumbum",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "625516",
+      "test_sampling_weight": 5,
+      "weight_basis": "user_reported_full_address",
+      "reference_ids": [
+        "F02"
+      ],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "TN-krishnagiri-635112",
+      "city": "Krishnagiri",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "635112",
+      "test_sampling_weight": 3,
+      "weight_basis": "user_reported_city_pin",
+      "reference_ids": [
+        "T01"
+      ],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "TN-madurai-625001",
+      "city": "Madurai",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "625001",
+      "test_sampling_weight": 5,
+      "weight_basis": "user_reported_full_address",
+      "reference_ids": [
+        "F03",
+        "F05"
+      ],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "TN-madurai-625002",
+      "city": "Madurai",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "625002",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "WB-kolkata-700016",
+      "city": "Kolkata",
+      "state_code": "WB",
+      "state": "West Bengal",
+      "postal_code": "700016",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "WB-kolkata-700027",
+      "city": "Kolkata",
+      "state_code": "WB",
+      "state": "West Bengal",
+      "postal_code": "700027",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "WB-kolkata-700091",
+      "city": "Kolkata",
+      "state_code": "WB",
+      "state": "West Bengal",
+      "postal_code": "700091",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    },
+    {
+      "location_id": "WB-siliguri-734001",
+      "city": "Siliguri",
+      "state_code": "WB",
+      "state": "West Bengal",
+      "postal_code": "734001",
+      "test_sampling_weight": 1,
+      "weight_basis": "baseline",
+      "reference_ids": [],
+      "verification_status": "not_postally_verified"
+    }
+  ],
+  "references": [
+    {
+      "reference_id": "T01",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-19 22:46",
+      "city_original": "Krishnagiri",
+      "city": "Krishnagiri",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "635112",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "T02",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-19 23:49",
+      "city_original": "Mumbai",
+      "city": "Mumbai",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "400017",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "T03",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-20 09:32",
+      "city_original": "Lucknow",
+      "city": "Lucknow",
+      "state_code": "UP",
+      "state": "Uttar Pradesh",
+      "postal_code": "226010",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": false,
+      "exclusion_reason": "state_not_allowed"
+    },
+    {
+      "reference_id": "T04",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-20 14:28",
+      "city_original": "Vijayawada",
+      "city": "Vijayawada",
+      "state_code": "AP",
+      "state": "Andhra Pradesh",
+      "postal_code": "520010",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": false,
+      "exclusion_reason": "state_not_allowed"
+    },
+    {
+      "reference_id": "T05",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-20 14:33",
+      "city_original": "Delhi",
+      "city": "New Delhi",
+      "state_code": "DL",
+      "state": "Delhi",
+      "postal_code": "110001",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "T06",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-20 22:27",
+      "city_original": "Ahmedabad",
+      "city": "Ahmedabad",
+      "state_code": "GJ",
+      "state": "Gujarat",
+      "postal_code": "380007",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": false,
+      "exclusion_reason": "state_not_allowed"
+    },
+    {
+      "reference_id": "T07",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-21 11:51",
+      "city_original": "Ahmedabad",
+      "city": "Ahmedabad",
+      "state_code": "GJ",
+      "state": "Gujarat",
+      "postal_code": "380008",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": false,
+      "exclusion_reason": "state_not_allowed"
+    },
+    {
+      "reference_id": "T08",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-21 14:27",
+      "city_original": "Kochi",
+      "city": "Kochi",
+      "state_code": "KL",
+      "state": "Kerala",
+      "postal_code": "682036",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": false,
+      "exclusion_reason": "state_not_allowed"
+    },
+    {
+      "reference_id": "T09",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-21 16:11",
+      "city_original": "Coimbatore",
+      "city": "Coimbatore",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "641018",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "T10",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-21 16:15",
+      "city_original": "Coimbatore",
+      "city": "Coimbatore",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "641018",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "T11",
+      "kind": "user_reported_city_pin",
+      "reported_success_at": "2026-09-22 21:34",
+      "city_original": "Thiruvananthapuram",
+      "city": "Thiruvananthapuram",
+      "state_code": "KL",
+      "state": "Kerala",
+      "postal_code": "695024",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": false,
+      "exclusion_reason": "state_not_allowed"
+    },
+    {
+      "reference_id": "F01",
+      "kind": "user_reported_full_address",
+      "line1_original": "140 Pawasakar Galli Road, Somwar Peth",
+      "city_original": "Karad",
+      "city": "Karad",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "415100",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "F02",
+      "kind": "user_reported_full_address",
+      "line1_original": "441 Kollam - Theni Road (Old NH220)",
+      "city_original": "Cumbum",
+      "city": "Cumbum",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "625516",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "F03",
+      "kind": "user_reported_full_address",
+      "line1_original": "151 East Aadi Street, Sellur",
+      "city_original": "Madurai",
+      "city": "Madurai",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "625001",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "F04",
+      "kind": "user_reported_full_address",
+      "line1_original": "104 Santa Cruz – Chembur Link Road, Netaji Nagar",
+      "city_original": "Mumbai",
+      "city": "Mumbai",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "400070",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "F05",
+      "kind": "user_reported_full_address",
+      "line1_original": "404 East Chithirai Street, Sellur",
+      "city_original": "Madurai",
+      "city": "Madurai",
+      "state_code": "TN",
+      "state": "Tamil Nadu",
+      "postal_code": "625001",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "F06",
+      "kind": "user_reported_full_address",
+      "line1_original": "385 Rambaug Lane Number 2, Khadakpada",
+      "city_original": "Kalyan-Dombivli",
+      "city": "Kalyan-Dombivli",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "421306",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    },
+    {
+      "reference_id": "F07",
+      "kind": "user_reported_full_address",
+      "line1_original": "64 Shivaji Road, Kasba Peth",
+      "city_original": "Pune",
+      "city": "Pune",
+      "state_code": "MH",
+      "state": "Maharashtra",
+      "postal_code": "411001",
+      "verification_status": "user_reported_unverified",
+      "included_in_sandbox": true
+    }
+  ]
+}

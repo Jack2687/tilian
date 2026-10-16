@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
+import shutil
+import tempfile
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 import billing_address_resolver as resolver
 import upi_link_service as upi
 
-
 MUMBAI_ROW = ('Apollo Bunder, Colaba', 'Mumbai', 'MH', '400001')
 BENGALURU_ROW = ('1 Residency Road', 'Bengaluru', 'KA', '560025')
+KERALA_ROW = ('Marine Drive', 'Kochi', 'KL', '682031')
 
 
 def caller_billing() -> dict:
@@ -72,10 +75,11 @@ class IndianAddressValidationTests(OfflineBillingTestCase):
         for city, state, postal in (
             ('Bombay', 'MH', '400026'),
             ('Bangalore', 'Karnataka', '560001'),
-            ('Gurgaon', 'HR', '122001'),
         ):
             with self.subTest(city=city):
                 self.assertTrue(upi._is_complete_indian_address('Customer street', city, state, postal))
+        # 池外地区（Gurgaon/HR）不参与校验，即使本地写法一致也应拒绝
+        self.assertFalse(upi._is_complete_indian_address('Customer street', 'Gurgaon', 'HR', '122001'))
 
     def test_missing_street_and_malformed_pin_are_rejected(self):
         for line1, postal in (
@@ -116,8 +120,22 @@ class BillingPoolTests(OfflineBillingTestCase):
         )
         with patch.object(upi, 'UPI_BILLING_ADDRESS_POOL', primary), patch.object(
             resolver, '_BUILTIN_PUBLIC_ADDRESSES', supplemental
-        ):
+        ), patch.object(upi, '_external_billing_address_rows', return_value=[]):
             self.assertCountEqual(upi._upi_billing_address_rows(), [MUMBAI_ROW, BENGALURU_ROW])
+
+    def test_rows_outside_the_configured_states_are_dropped(self):
+        supplemental = {
+            'IN': [
+                dict(zip(('line1', 'city', 'state', 'postal_code'), KERALA_ROW)),
+                dict(zip(('line1', 'city', 'state', 'postal_code'), BENGALURU_ROW)),
+            ],
+        }
+        with patch.object(upi, 'UPI_BILLING_ADDRESS_POOL', (MUMBAI_ROW, KERALA_ROW)), patch.object(
+            resolver, '_BUILTIN_PUBLIC_ADDRESSES', supplemental
+        ), patch.object(upi, '_external_billing_address_rows', return_value=[]):
+            rows = upi._upi_billing_address_rows()
+        self.assertCountEqual(rows, [MUMBAI_ROW, BENGALURU_ROW])
+        self.assertNotIn(KERALA_ROW, rows)
 
     def test_adjacent_selections_do_not_repeat_when_multiple_rows_are_available(self):
         with patch.object(upi, '_upi_billing_address_rows', return_value=[MUMBAI_ROW, BENGALURU_ROW]):
@@ -134,6 +152,110 @@ class BillingPoolTests(OfflineBillingTestCase):
         with patch.object(upi, '_upi_billing_address_rows', return_value=[MUMBAI_ROW, BENGALURU_ROW]):
             self.assertEqual(address_row(upi._random_upi_billing_address('Bangalore')), BENGALURU_ROW)
             self.assertIn(address_row(upi._random_upi_billing_address('Unknown City')), (MUMBAI_ROW, BENGALURU_ROW))
+
+
+class ExternalBillingPoolFileTests(OfflineBillingTestCase):
+    """UPI_BILLING_POOL_FILE is an opt-in operator channel; unset means unchanged."""
+
+    def setUp(self):
+        super().setUp()
+        upi._reset_upi_billing_row_caches()
+        self.addCleanup(upi._reset_upi_billing_row_caches)
+        self.enterContext(patch.dict(os.environ, {'UPI_BILLING_POOL_FILE': ''}))
+
+    def write_pool(self, payload, name='pool.json'):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        path = os.path.join(directory, name)
+        text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        return path
+
+    def rows_with(self, path):
+        os.environ['UPI_BILLING_POOL_FILE'] = path
+        upi._reset_upi_billing_row_caches()
+        return upi._upi_billing_address_rows()
+
+    def test_no_file_configured_keeps_the_builtin_pool(self):
+        self.assertEqual(upi._external_billing_address_rows(), [])
+        self.assertEqual(upi._external_billing_pool_file(), '')
+
+    def test_wrapped_object_rows_are_loaded_and_validated(self):
+        path = self.write_pool({'addresses': [
+            {'line1': '140 Pawasakar Galli Road, Somwar Peth', 'city': 'Karad', 'state': 'MH', 'postal_code': '415100'},
+            {'line1': '64 Shivaji Road, Kasba Peth', 'city': 'Pune', 'state': 'MH', 'postal_code': '411001'},
+        ]})
+        rows = self.rows_with(path)
+        self.assertIn(('140 Pawasakar Galli Road, Somwar Peth', 'Karad', 'MH', '415100'), rows)
+        # 新城市同时进入抽样池与显式地址校验
+        self.assertIn('karad', upi._known_indian_cities())
+        self.assertTrue(upi._is_complete_indian_address('X', 'Karad', 'MH', '415100'))
+
+    def test_flat_array_and_jsonl_shapes_are_both_accepted(self):
+        flat = self.write_pool([
+            {'line1': '64 Shivaji Road, Kasba Peth', 'city': 'Pune', 'state': 'MH', 'postal_code': '411001'},
+        ], name='flat.json')
+        jsonl = self.write_pool(
+            '{"line1": "64 Shivaji Road, Kasba Peth", "city": "Pune", "state": "MH", "postal_code": "411001"}\n',
+            name='rows.jsonl',
+        )
+        expected = ('64 Shivaji Road, Kasba Peth', 'Pune', 'MH', '411001')
+        for path in (flat, jsonl):
+            with self.subTest(path=path):
+                self.assertIn(expected, self.rows_with(path))
+
+    def test_out_of_scope_and_malformed_records_are_dropped(self):
+        path = self.write_pool({'addresses': [
+            {'line1': 'Marine Drive', 'city': 'Kochi', 'state': 'KL', 'postal_code': '682031'},
+            {'line1': 'Bhawani Singh Road', 'city': 'Jaipur', 'state': 'RJ', 'postal_code': '302005'},
+            {'line1': '64 Shivaji Road, Kasba Peth', 'city': 'Pune', 'state': 'MH', 'postal_code': '411001'},
+            {'line1': 'Bad PIN', 'city': 'Pune', 'state': 'MH', 'postal_code': '41100'},
+            {'line1': 'Unknown city', 'city': 'Nowhere', 'state': 'MH', 'postal_code': '411001'},
+            {'line1': 'No state', 'city': 'Pune', 'state': 'ZZ', 'postal_code': '411001'},
+            {'line1': '', 'city': 'Pune', 'state': 'MH', 'postal_code': '411001'},
+            {'line1': 'Not a dict row'},
+            'not even an object',
+        ]})
+        rows = self.rows_with(path)
+        self.assertIn(('64 Shivaji Road, Kasba Peth', 'Pune', 'MH', '411001'), rows)
+        self.assertNotIn('kochi', upi._known_indian_cities())
+        self.assertNotIn('jaipur', upi._known_indian_cities())
+        self.assertFalse(upi._is_complete_indian_address('X', 'Kochi', 'KL', '682031'))
+
+    def test_missing_or_malformed_file_falls_back_without_raising(self):
+        garbage = self.write_pool('{ this is not json', name='garbage.json')
+        absent = os.path.join(tempfile.gettempdir(), 'definitely-absent-pool.json')
+        for path in (absent, garbage):
+            with self.subTest(path=path):
+                os.environ['UPI_BILLING_POOL_FILE'] = path
+                upi._reset_upi_billing_row_caches()
+                # 读不出内容时不报错，只是没有额外行
+                self.assertEqual(upi._external_billing_address_rows(), [])
+                # 内置池的成员关系不受影响
+                self.assertEqual(upi._is_complete_indian_address(*MUMBAI_ROW), True)
+
+    def test_loaded_rows_survive_dedup_against_the_builtin_pool(self):
+        # 与内置池重复的行只保留一条
+        path = self.write_pool({'addresses': [
+            {'line1': 'Apollo Bunder, Colaba', 'city': 'Mumbai', 'state': 'MH', 'postal_code': '400001'},
+        ]})
+        with patch.object(upi, 'UPI_BILLING_ADDRESS_POOL', (MUMBAI_ROW,)), \
+                patch.object(resolver, '_BUILTIN_PUBLIC_ADDRESSES', {'IN': []}):
+            rows = self.rows_with(path)
+        self.assertEqual(rows, [MUMBAI_ROW])
+
+    def test_repeated_reads_use_the_cached_rows(self):
+        path = self.write_pool({'addresses': [
+            {'line1': '64 Shivaji Road, Kasba Peth', 'city': 'Pune', 'state': 'MH', 'postal_code': '411001'},
+        ]})
+        os.environ['UPI_BILLING_POOL_FILE'] = path
+        upi._reset_upi_billing_row_caches()
+        expected = upi._external_billing_address_rows()
+        self.assertTrue(expected)
+        # 第二次读取命中缓存，不再触碰文件
+        with patch.object(upi, '_read_billing_row_source', side_effect=AssertionError('rows must be cached')):
+            self.assertEqual(upi._external_billing_address_rows(), expected)
 
 
 class BillingNormalizationTests(OfflineBillingTestCase):
@@ -310,6 +432,289 @@ class BillingExtractionBoundaryTests(OfflineBillingTestCase):
         for external in (self.client, self.auth, self.promo, self.probe, self.attempt):
             external.assert_not_called()
         self.build.assert_not_called()
+
+
+class ReverseAddressResolverTests(OfflineBillingTestCase):
+    """代理坐标反查：只做字段提取、缓存与失败回退，不发真实请求。"""
+
+    def setUp(self):
+        super().setUp()
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        self.enterContext(
+            patch.object(
+                resolver,
+                '_REVERSE_CACHE_PATH',
+                os.path.join(directory, 'nominatim_reverse_cache.json'),
+            )
+        )
+        self.enterContext(patch.object(resolver, '_LAST_NOMINATIM_AT', 0.0))
+        self.enterContext(patch.object(resolver.time, 'sleep', return_value=None))
+
+    def responder(self, payload, status=200):
+        response = MagicMock()
+        response.status_code = status
+        response.json.return_value = payload
+        return response
+
+    def test_city_state_mapping_normalizes_the_indian_state_name(self):
+        for code, state, city, postal in (
+            ('DL', 'Delhi', 'New Delhi', '110001'),
+            ('KA', 'Karnataka', 'Bengaluru', '560025'),
+            ('MH', 'Maharashtra', 'Mumbai', '400001'),
+            ('TN', 'Tamil Nadu', 'Chennai', '600034'),
+            ('WB', 'West Bengal', 'Kolkata', '700016'),
+        ):
+            for state_value in (code, state):
+                with self.subTest(state=state_value):
+                    fields = upi._reverse_address_fields({'address': {
+                        'line1': 'Fixture street', 'city': city,
+                        'state': state_value, 'postal_code': postal,
+                    }})
+                    self.assertEqual(fields['state'], code)
+                    self.assertEqual(fields['city'], city)
+
+    def test_reverse_address_outside_the_five_states_falls_back_to_the_pool(self):
+        """反查地址也受五地区限制，不能把被丢弃的地点名混入回退账单。"""
+        reverse = {
+            'name': 'Some Place',
+            'address': {
+                'line1': '12 MG Road', 'city': 'Kochi', 'state': 'Kerala',
+                'postal_code': '682031', 'country': 'IN',
+            },
+        }
+        for state in ('Kerala', 'KL', 'Gujarat', 'GJ', 'Uttar Pradesh', 'UP'):
+            with self.subTest(state=state):
+                reverse['address']['state'] = state
+                self.assertIsNone(upi._reverse_address_fields(reverse))
+                with patch.object(upi, '_random_upi_billing_address', wraps=upi._random_upi_billing_address) as pool:
+                    billing = upi.build_upi_billing(
+                        'account@example.test', None, reverse_address=reverse
+                    )
+                pool.assert_called_once()
+                self.assertIn(upi._upi_state_code(billing['state']), upi.UPI_BILLING_STATES)
+                self.assertNotEqual(billing['name'], 'Some Place')
+
+    def test_reverse_place_name_is_never_used_as_the_billing_name(self):
+        """Nominatim 的 name 是商户/地标名，不是人名，不能进账单姓名。"""
+        place_name = 'Sri Krishna Sweets'
+        reverse = {
+            'name': place_name,
+            'address': {
+                'line1': '12 MG Road', 'city': 'Bengaluru', 'state': 'Karnataka',
+                'postal_code': '560025', 'country': 'IN',
+            },
+        }
+        billing = upi.build_upi_billing(
+            'account@example.test', None, reverse_address=reverse
+        )
+        # 地址来自反查，姓名必须另生成。
+        self.assertEqual(billing['line1'], '12 MG Road')
+        self.assertEqual(billing['city'], 'Bengaluru')
+        self.assertNotEqual(billing['name'], place_name)
+        self.assertIn(billing['name'], upi.UPI_BILLING_NAMES)
+
+    def test_reverse_result_carries_no_name_field(self):
+        """反查结果本身就不该带 name，避免下游把它当姓名。"""
+        geo = {'country': 'IN', 'latitude': '12.9', 'longitude': '77.6'}
+        with patch.object(upi, '_probe_upi_exit_geo', return_value=geo), patch.object(
+            resolver, 'resolve_reverse_address', return_value={
+                'name': 'Sri Krishna Sweets',
+                'line1': '12 MG Road', 'city': 'Bengaluru',
+                'state': 'Karnataka', 'postal_code': '560025',
+            }
+        ):
+            result = upi._reverse_billing_from_proxy('http://proxy.invalid:8080')
+        self.assertNotIn('name', result)
+        self.assertEqual(result['address']['city'], 'Bengaluru')
+
+    def test_caller_name_still_wins_over_the_generated_one(self):
+        reverse = {
+            'name': 'Sri Krishna Sweets',
+            'address': {
+                'line1': '12 MG Road', 'city': 'Bengaluru', 'state': 'Karnataka',
+                'postal_code': '560025', 'country': 'IN',
+            },
+        }
+        billing = upi.build_upi_billing(
+            'account@example.test', caller_billing(), reverse_address=reverse
+        )
+        self.assertEqual(billing['name'], 'Billing Test')
+
+    def test_incomplete_reverse_result_falls_back_to_the_pool(self):
+        reverse = {
+            'address': {
+                'line1': '12 MG Road', 'city': 'Bengaluru', 'state': 'Karnataka',
+                'postal_code': '', 'country': 'IN',
+            }
+        }
+        with patch.object(upi, '_random_upi_billing_address', wraps=upi._random_upi_billing_address) as pool:
+            billing = upi.build_upi_billing(
+                'account@example.test', None, reverse_address=reverse
+            )
+        pool.assert_called_once()
+        self.assertEqual(billing['country'], 'IN')
+
+    def test_caller_address_wins_over_the_reverse_result(self):
+        reverse = {
+            'address': {
+                'line1': 'Reverse street', 'city': 'Kochi', 'state': 'Kerala',
+                'postal_code': '682031', 'country': 'IN',
+            }
+        }
+        billing = upi.build_upi_billing(
+            'account@example.test', caller_billing(), reverse_address=reverse
+        )
+        self.assertEqual(billing['line1'], 'Customer supplied street')
+        self.assertEqual(billing['postal_code'], '400026')
+
+    def test_valid_coordinates_are_mapped_and_then_served_from_cache(self):
+        payload = {
+            'display_name': '12, MG Road, Kochi, Kerala, India',
+            'name': 'Some Shop',
+            'address': {
+                'country_code': 'in', 'road': 'MG Road', 'house_number': '12',
+                'city': 'Kochi', 'state': 'Kerala', 'postcode': '682031',
+            },
+        }
+        with patch.object(
+            resolver.requests, 'get', return_value=self.responder(payload)
+        ) as request:
+            first = resolver.resolve_reverse_address(9.9312, 76.2673, 'IN')
+            second = resolver.resolve_reverse_address(9.9312, 76.2673, 'IN')
+        self.assertEqual(first['line1'], '12 MG Road')
+        self.assertEqual(first['city'], 'Kochi')
+        self.assertEqual(first['source'], 'openstreetmap_nominatim_reverse')
+        self.assertEqual(second, first)
+        self.assertEqual(request.call_count, 1)
+
+    def test_foreign_country_and_invalid_coordinates_are_rejected(self):
+        payload = {'address': {'country_code': 'us', 'road': 'X', 'city': 'New York'}}
+        with patch.object(resolver.requests, 'get', return_value=self.responder(payload)):
+            self.assertIsNone(resolver.resolve_reverse_address(40.7, -74.0, 'IN'))
+        for lat, lon in (('', ''), ('x', '1'), (91.0, 0.0), (0.0, 181.0)):
+            with self.subTest(latitude=lat, longitude=lon):
+                self.assertIsNone(resolver.resolve_reverse_address(lat, lon, 'IN'))
+
+    def test_missing_city_or_street_is_not_a_usable_address(self):
+        payload = {'address': {'country_code': 'in', 'road': 'MG Road'}}
+        with patch.object(resolver.requests, 'get', return_value=self.responder(payload)):
+            self.assertIsNone(resolver.resolve_reverse_address(9.9, 76.2, 'IN'))
+
+    def test_network_failure_returns_none_instead_of_raising(self):
+        with patch.object(
+            resolver.requests, 'get', side_effect=RuntimeError('proxy unreachable')
+        ):
+            self.assertIsNone(resolver.resolve_reverse_address(9.9, 76.2, 'IN'))
+
+    def test_non_indian_proxy_exit_never_triggers_a_lookup(self):
+        geo = {'country': 'US', 'city': 'New York', 'latitude': '40.7', 'longitude': '-74.0'}
+        with patch.object(upi, '_probe_upi_exit_geo', return_value=geo), patch.object(
+            resolver, 'resolve_reverse_address'
+        ) as lookup:
+            self.assertEqual(upi._reverse_billing_from_proxy('http://proxy.invalid:8080'), {})
+        lookup.assert_not_called()
+
+    def test_proxy_lookup_discards_cached_or_fresh_results_outside_the_five_states(self):
+        geo = {'country': 'IN', 'latitude': '9.9', 'longitude': '76.2'}
+        with patch.object(upi, '_probe_upi_exit_geo', return_value=geo):
+            for state, accepted in (('Kerala', False), ('KL', False), ('Tamil Nadu', True), ('TN', True)):
+                with self.subTest(state=state), patch.object(resolver, 'resolve_reverse_address', return_value={
+                    'line1': 'Fixture street', 'city': 'Fixture city',
+                    'state': state, 'postal_code': '625001',
+                }):
+                    result = upi._reverse_billing_from_proxy('http://proxy.invalid:8080')
+                    self.assertEqual(bool(result), accepted)
+
+    def test_reverse_flag_can_be_switched_off(self):
+        for value, expected in (
+            ('0', False), ('false', False), ('no', False), ('off', False),
+            ('1', True), ('true', True), ('', True),
+        ):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {'UPI_BILLING_REVERSE': value}):
+                    self.assertEqual(upi._upi_billing_reverse_enabled(), expected)
+
+
+class ReverseBillingExtractionTests(OfflineBillingTestCase):
+    """反查地址必须真的进入建单用的账单，而不是只让单元函数返回正确。"""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, {'UPI_BILLING_SYNC_CITY': '0'}))
+        self.enterContext(patch.object(upi, '_EXIT_CITY_BY_PROXY', {}))
+        self.enterContext(patch.object(upi, 'UpiHttpClient'))
+        self.enterContext(patch.object(upi, 'resolve_upi_access_token', return_value='fixture-token'))
+        self.enterContext(patch.object(upi, '_jwt_email', return_value='account@example.test'))
+        self.enterContext(patch.object(upi, '_fetch_promo_coupon_state', return_value='unknown'))
+        self.attempt = self.enterContext(
+            patch.object(upi, '_run_upi_attempt', side_effect=lambda *a, **k: {'ok': True})
+        )
+        self.enterContext(patch.object(upi, '_human_pause', side_effect=AssertionError('Unexpected retry')))
+
+    @staticmethod
+    def reverse_result():
+        return {
+            'address': {
+                'line1': 'Fixture street', 'city': 'Bengaluru', 'state': 'Karnataka',
+                'postal_code': '560025', 'country': 'IN',
+            },
+            '_address_source': 'openstreetmap_nominatim_reverse',
+        }
+
+    def test_reverse_address_reaches_the_attempt_billing(self):
+        with patch.object(upi, '_reverse_billing_from_proxy', return_value=self.reverse_result()):
+            result = upi.extract_upi_link('fixture-token', 'http://proxy.invalid:8080')
+        self.assertTrue(result['ok'])
+        billing = self.attempt.call_args.kwargs['billing']
+        self.assertEqual(billing['line1'], 'Fixture street')
+        self.assertEqual(billing['city'], 'Bengaluru')
+        self.assertEqual(billing['state'], 'Karnataka')
+        self.assertEqual(billing['postal_code'], '560025')
+        # 姓名必须来自姓名库，不能是地点名，也不能是空的。
+        self.assertIn(billing['name'], upi.UPI_BILLING_NAMES)
+        # 结果字典保持既有契约，不携带内部来源标记。
+        self.assertNotIn('_address_source', billing)
+        address_steps = [s for s in result['steps'] if s['name'] == '账单地址']
+        self.assertIn('source=openstreetmap_nominatim_reverse', address_steps[-1]['detail'])
+
+    def test_outside_region_never_reaches_checkout_or_claims_reverse_source(self):
+        reverse = self.reverse_result()
+        reverse['address'].update(city='Kochi', state='Kerala', postal_code='682031')
+        with patch.object(upi, '_reverse_billing_from_proxy', return_value=reverse):
+            result = upi.extract_upi_link('fixture-token', 'http://proxy.invalid:8080')
+        billing = self.attempt.call_args.kwargs['billing']
+        self.assertIn(upi._upi_state_code(billing['state']), upi.UPI_BILLING_STATES)
+        self.assertNotEqual(billing['city'], 'Kochi')
+        address_steps = [step for step in result['steps'] if step['name'] == '账单地址' and step['status'] == 'info']
+        self.assertEqual(len(address_steps), 1)
+        self.assertIn('source=upi_billing_pool', address_steps[0]['detail'])
+        self.assertNotIn('openstreetmap_nominatim_reverse', address_steps[0]['detail'])
+
+    def test_caller_address_short_circuits_the_reverse_lookup(self):
+        with patch.object(upi, '_reverse_billing_from_proxy') as reverse:
+            self.assertTrue(
+                upi.extract_upi_link(
+                    'fixture-token', 'http://proxy.invalid:8080', billing=caller_billing()
+                )['ok']
+            )
+        reverse.assert_not_called()
+        self.assertEqual(self.attempt.call_args.kwargs['billing']['line1'], 'Customer supplied street')
+
+    def test_disabled_flag_skips_the_reverse_lookup_and_uses_the_pool(self):
+        os.environ['UPI_BILLING_REVERSE'] = '0'
+        with patch.object(upi, '_reverse_billing_from_proxy') as reverse:
+            self.assertTrue(upi.extract_upi_link('fixture-token', 'http://proxy.invalid:8080')['ok'])
+        reverse.assert_not_called()
+        billing = self.attempt.call_args.kwargs['billing']
+        self.assertEqual(billing['country'], 'IN')
+        self.assertIn(billing['state'], ('Delhi', 'Karnataka', 'Maharashtra', 'Tamil Nadu', 'West Bengal'))
+
+    def test_failed_reverse_lookup_falls_back_to_the_pool(self):
+        with patch.object(upi, '_reverse_billing_from_proxy', return_value={}):
+            self.assertTrue(upi.extract_upi_link('fixture-token', 'http://proxy.invalid:8080')['ok'])
+        billing = self.attempt.call_args.kwargs['billing']
+        self.assertIn(billing['state'], ('Delhi', 'Karnataka', 'Maharashtra', 'Tamil Nadu', 'West Bengal'))
 
 
 if __name__ == '__main__':

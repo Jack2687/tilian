@@ -426,6 +426,34 @@ def _approval_risk_headers(
     return out
 
 
+def _gopay_billing_reverse_enabled() -> bool:
+    """是否按代理出口坐标反查账单（默认开启；设为 0/false 退回内置街道表）。"""
+    return str(os.environ.get("GOPAY_BILLING_REVERSE") or "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _reverse_gopay_billing(fingerprint: Optional[dict], country: str) -> dict:
+    """按代理出口坐标反查一条印尼账单；失败返回空字典让调用方回退内置街道表。
+
+    只在出口国家与账单国家一致时才反查：出口不在印尼却用印尼地址，等于把账单
+    国家和出口位置割裂开。反查结果只提供地址，姓名仍由本地姓名库生成。
+    """
+    fp = fingerprint or {}
+    if not _gopay_billing_reverse_enabled():
+        return {}
+    lat = str(fp.get("proxy_latitude") or "").strip()
+    lon = str(fp.get("proxy_longitude") or "").strip()
+    if not lat or not lon:
+        return {}
+    if str(fp.get("proxy_country") or "").strip().upper() != str(country or "").strip().upper():
+        return {}
+    try:
+        from id_billing import resolve_reverse_address
+        resolved = resolve_reverse_address(lat, lon, str(country or "").strip().upper())
+    except Exception:
+        return {}
+    return resolved if isinstance(resolved, dict) else {}
+
+
 def _fail(stage: str, message: str, reason_code: str, t0: float, extra: Optional[dict] = None) -> dict:
     out = {
         "ok": False, "link": "", "error": message, "reason_code": reason_code,
@@ -903,14 +931,20 @@ def extract_gopay_custom_link(
     _billing = {}
     try:
         from id_billing import generate_id_billing as _gen_billing
+        # 坐标反查优先：出口城市名只能匹配到内置街道表里的整座城市，坐标能把
+        # 街道落到出口所在的具体位置。反查失败或无坐标时回退同城匹配。
+        _reverse = _reverse_gopay_billing(fp, cc)
+        if _reverse:
+            log("config", "run", "代理坐标反查命中账单地址（" + str(_reverse.get("city") or "?") + "）")
         _geo_city = str(fp.get("proxy_city") or "")
-        if not _geo_city:
+        if not _geo_city and not _reverse:
             try:
                 from id_billing import probe_exit_city as _probe_city
                 _geo_city = _probe_city(proxy, timeout=min(max(timeout, 5.0), 8.0))
             except Exception:
                 _geo_city = ""
-        _billing = _gen_billing(str(fp.get("account_email") or ""), country=cc, currency=cur, seed=None, geo_city=_geo_city)
+        _billing = _gen_billing(str(fp.get("account_email") or ""), country=cc, currency=cur,
+                                seed=None, geo_city=_geo_city, reverse_address=_reverse or None)
     except Exception as exc:
         log("taxes", "warn", "ID 账单生成器异常（使用最小账单）：" + type(exc).__name__ + "：" + str(exc)[:100])
         _billing = {

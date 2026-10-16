@@ -16,6 +16,26 @@ _RESOLVE_LOCK = threading.Lock()
 _NOMINATIM_LOCK = threading.Lock()
 _LAST_NOMINATIM_AT = 0.0
 _LAST_PICK: dict[str, str] = {}
+
+# 代理坐标反查缓存。默认按引擎根目录下的 data/ 存放：worker 以引擎目录为工作目录
+# 启动子进程，这个相对路径可写；参考包的 /opt/pay153/data 在本项目的部署里没有
+# 对应目录，照抄会让缓存写入静默失败，每次提链都要重新请求 Nominatim。
+_REVERSE_CACHE_PATH = Path(
+    os.getenv(
+        "PAY153_NOMINATIM_REVERSE_CACHE",
+        str(Path(__file__).resolve().parent / "data" / "nominatim_reverse_cache.json"),
+    )
+)
+_REVERSE_CACHE_LOCK = threading.RLock()
+# 坐标 -> 地址在 30 天内视为稳定；Nominatim 返回的地点不会频繁变化。
+_REVERSE_CACHE_TTL_SECONDS = 2592000
+# 缓存条目上限，超出后按写入时间淘汰最旧的。
+_REVERSE_CACHE_MAX_ENTRIES = 5000
+_REVERSE_REQUEST_TIMEOUT_SECONDS = 20.0
+# Nominatim 公共实例要求全应用最多每秒 1 次请求，这里留出余量。
+_NOMINATIM_MIN_INTERVAL_SECONDS = 1.05
+_NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+_NOMINATIM_USER_AGENT = "tilian-upi-billing-resolver/1.0"
 _RECENT_PICKS: dict[str, list[str]] = {}
 _PICK_LOCK = threading.Lock()
 _MEMORY_CACHE: dict[str, list[dict[str, str]]] | None = None
@@ -132,6 +152,197 @@ def _save_cache(cache: dict[str, list[dict[str, str]]]) -> None:
         _MEMORY_CACHE_MTIME_NS = _CACHE_PATH.stat().st_mtime_ns
     except Exception:
         pass
+
+
+def _reverse_cache_file() -> Path:
+    """反查缓存路径。统一转成 Path：调用方可能用字符串覆盖这个模块变量，
+    而 str 没有 .parent/.read_text，直接使用会静默丢失缓存。"""
+    return Path(_REVERSE_CACHE_PATH)
+
+
+def _load_reverse_cache() -> dict[str, dict[str, Any]]:
+    try:
+        data = json.loads(_reverse_cache_file().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_reverse_cache(cache: dict[str, dict[str, Any]]) -> None:
+    try:
+        path = _reverse_cache_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def _reverse_cache_key(lat: float, lon: float, country: str) -> str:
+    return f"{lat:.5f},{lon:.5f}|{country}"
+
+
+def _nominatim_reverse_once(lat: float, lon: float) -> dict[str, Any] | None:
+    """按全局限速发一次反向查询，失败返回 None 而不抛错。"""
+    global _LAST_NOMINATIM_AT
+    with _NOMINATIM_LOCK:
+        delay = _NOMINATIM_MIN_INTERVAL_SECONDS - (time.monotonic() - _LAST_NOMINATIM_AT)
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            response = requests.get(
+                _NOMINATIM_REVERSE_URL,
+                params={
+                    "format": "jsonv2",
+                    "lat": f"{lat:.7f}",
+                    "lon": f"{lon:.7f}",
+                    "addressdetails": 1,
+                    "accept-language": "en",
+                    "zoom": 18,
+                    "layer": "address",
+                },
+                headers={"User-Agent": _NOMINATIM_USER_AGENT},
+                timeout=_REVERSE_REQUEST_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            return None
+        finally:
+            _LAST_NOMINATIM_AT = time.monotonic()
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json() or {}
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _reverse_address_from_payload(
+    payload: dict[str, Any], lat: float, lon: float, country: str
+) -> dict[str, str] | None:
+    """把 Nominatim 响应整理成账单字段；城市或街道缺失时返回 None。
+
+    只做字段提取，不判断这是否是付款人的真实账单地址，也不要求邮编存在。
+    """
+    address = payload.get("address") or {}
+    item_country = str(address.get("country_code") or "").strip().upper()
+    if country and item_country != country:
+        return None
+    road = str(
+        address.get("road")
+        or address.get("pedestrian")
+        or address.get("residential")
+        or address.get("footway")
+        or address.get("path")
+        or ""
+    ).strip()
+    house_number = str(address.get("house_number") or "").strip()
+    place_name = str(
+        address.get("amenity")
+        or address.get("building")
+        or address.get("shop")
+        or address.get("tourism")
+        or payload.get("name")
+        or ""
+    ).strip()
+    line1 = " ".join(part for part in (house_number, road) if part).strip()
+    if not line1 and place_name:
+        line1 = place_name
+    elif (
+        not house_number
+        and place_name
+        and road
+        and place_name.casefold() != road.casefold()
+    ):
+        line1 = f"{place_name}, {road}"
+    city = str(
+        address.get("city")
+        or address.get("town")
+        or address.get("village")
+        or address.get("municipality")
+        or address.get("city_district")
+        or address.get("county")
+        or ""
+    ).strip()
+    if not line1 or not city:
+        return None
+    return {
+        "name": place_name,
+        "line1": line1,
+        "city": city,
+        "state": str(address.get("state") or address.get("state_district") or "").strip(),
+        "postal_code": str(address.get("postcode") or "").strip(),
+        "country": item_country or country,
+        "source": "openstreetmap_nominatim_reverse",
+        "display_name": str(payload.get("display_name") or "").strip(),
+        "latitude": f"{lat:.7f}",
+        "longitude": f"{lon:.7f}",
+    }
+
+
+def resolve_reverse_address(
+    latitude: Any, longitude: Any, expected_country: str = ""
+) -> dict[str, str] | None:
+    """按代理出口坐标反查一条账单地址，命中缓存时不联网。
+
+    返回 None 表示坐标无效、反查失败或结果不在 expected_country 内，调用方应回退
+    到本地地址池。这里返回的是地图上该坐标附近的地点，不代表付款人的真实账单地址。
+    """
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+    except (TypeError, ValueError):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+
+    country = str(expected_country or "").strip().upper()
+    cache_key = _reverse_cache_key(lat, lon, country)
+    now = time.time()
+    with _REVERSE_CACHE_LOCK:
+        cached = _load_reverse_cache().get(cache_key) or {}
+    if (
+        isinstance(cached, dict)
+        and now - float(cached.get("_cached_at") or 0) <= _REVERSE_CACHE_TTL_SECONDS
+    ):
+        return {
+            str(key): str(value)
+            for key, value in cached.items()
+            if key != "_cached_at" and value is not None
+        }
+
+    resolved = None
+    for _ in range(2):
+        payload = _nominatim_reverse_once(lat, lon)
+        if payload is not None:
+            resolved = _reverse_address_from_payload(payload, lat, lon, country)
+            break
+    if resolved is None:
+        return None
+
+    with _REVERSE_CACHE_LOCK:
+        cache = _load_reverse_cache()
+        cache[cache_key] = {**resolved, "_cached_at": now}
+        if len(cache) > _REVERSE_CACHE_MAX_ENTRIES:
+            cache = dict(
+                sorted(
+                    cache.items(),
+                    key=lambda item: float((item[1] or {}).get("_cached_at") or 0),
+                    reverse=True,
+                )[:_REVERSE_CACHE_MAX_ENTRIES]
+            )
+        _save_reverse_cache(cache)
+    return resolved
+
+
+def _reset_reverse_cache() -> None:
+    """清空坐标反查缓存，供测试与运维手动重置使用。"""
+    with _REVERSE_CACHE_LOCK:
+        try:
+            _reverse_cache_file().unlink()
+        except OSError:
+            pass
 
 
 def _component(components: list[dict[str, Any]], kind: str, *, short: bool = False) -> str:

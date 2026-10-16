@@ -11,8 +11,13 @@
 **/runtime/
 **/sessions/
 **/data/*.json
+# Operator-maintained UPI billing addresses is a deployment asset, not generated
+# data. git cannot re-include a file whose parent directory is excluded, so the
+# directory is excluded by contents (data/*) rather than wholesale.
+!data/upi_billing_addresses.json
 _research/
-data/
+data/*
+!data/upi_billing_addresses.json
 backup_full_*/
 backup_local_*/
 
@@ -46,6 +51,7 @@ Thumbs.db
 .DS_Store
 .idea/
 .vscode/
+.claude/
 .venv/
 Python/
 

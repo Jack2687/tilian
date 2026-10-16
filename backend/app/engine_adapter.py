@@ -422,13 +422,23 @@ class EngineAdapter:
         raise ValueError(f"unsupported engine mode: {mode}")
 
     def environment(self, mode: str, payload: dict[str, Any]) -> dict[str, str]:
+        # 基线是宿主的完整环境，因此 REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE/SSL_CERT_FILE
+        # 本来就随子进程继承，账单坐标反查与提链主链路共用同一套证书配置。
         environment = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-        if str(mode or "").strip().lower() == "gcash":
+        mode = str(mode or "").strip().lower()
+        if mode == "gcash":
             params = _params(payload)
             force_cpmt = _bool_param(params, "forceGcashCpmt", "forcePaymentMethod", "forceMethod")
             force_zero = _force_zero(params)
             environment["GCASH_FORCE_CPMT"] = "1" if force_cpmt else "0"
             environment["GCASH_FORCE_ZERO"] = "1" if force_zero else "0"
+        if mode in {"upi", "gopay"}:
+            params = _params(payload)
+            # 两个通道的账单默认都按代理出口坐标反查，可用任务参数关掉。
+            reverse_key = f"{mode}BillingReverse"
+            reverse = params.get(reverse_key)
+            if reverse is not None:
+                environment[f"{mode.upper()}_BILLING_REVERSE"] = "1" if _bool_param(params, reverse_key) else "0"
         return environment
 
     def _normalize_result(self, mode: str, raw: Any, params: dict[str, Any] | None = None) -> dict[str, Any]:
